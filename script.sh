@@ -1,4 +1,4 @@
-APP='rhoai-v2-17'
+APP="$1"
 
 echo "Getting components list for $APP..."
 components=$(kubectl get component -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")

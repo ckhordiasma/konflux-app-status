@@ -1,4 +1,72 @@
-APP="$1"
+
+# TODO
+# - add check in while loop to terminate with error if remaining_components is not decreasing
+# - add checks for valid kubectl context
+# - add checks for kubectl installed
+
+## TODO New Features
+# - add pipeline re-triggering command
+# - add logs viewing command 
+
+
+set -e
+
+help() {
+cat << EOF
+usage: ./konfcli [-H] [-v] [-o json|table] APP
+EOF
+}
+
+APP=
+OUTPUT_TYPE=table
+VERBOSE=false
+HYPERLINKS=true
+
+while [ "$#" -gt 0 ]; do
+  key="$1"
+  case $key in 
+    --help | -h)
+      help
+      exit
+      ;;
+    --no-hyperlinks | -H)
+      HYPERLINKS=false
+      shift
+      ;;
+    -v)
+      VERBOSE=true
+      shift
+      ;;
+    --output | -o)
+      OUTPUT_TYPE="$2"
+      if [ -z "$OUTPUT_TYPE" ]; then
+        echo "please specify an output format of json or table"
+        help
+        exit 1
+      fi
+      shift 2
+      ;;
+    -*)
+      echo "unrecognized argument $1"
+      help
+      exit 1
+      ;;
+    *)
+      # assume that the argument is $APP, otherwise consume and ignore
+      if [ -z "$APP" ]; then
+        APP="$1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+
+function log () {
+    if [[ "$VERBOSE" = "true" ]]; then
+        echo "$@"
+    fi
+}
 
 CONTEXT=$(kubectl config current-context)
 API_QUERY=$(cat <<'EOF'
@@ -17,10 +85,10 @@ function get_token() {
   echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
 }
 
-echo "Getting components list for $APP..."
+log "Getting components list for $APP..."
 components=$(kubectl get component -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
 
-echo "getting pipelines for $APP..."
+log "getting pipelines for $APP..."
 
 # event-type can be 'incoming' or 'push' for valid builds, so I am using a filter for != pull_request instead
 
@@ -67,17 +135,20 @@ while [ -n "$remaining_components" ]; do
   component_params="$app_params && ($is_remaining)"
 
 done
-# echo "$components_json" > all_components.json
-echo "formatting output..."
 
+if [ $OUTPUT_TYPE = "json" ]; then
+  echo "$components_json" | jq -r -M
+  exit 0
+fi
+
+log "formatting output..."
 # using semicolon as the delimiter for column command, and comma as delimiter for awk (for adding terminal hyperlinks)
 FINAL_OUTPUT=$(echo "$components_json" | jq -r '.[]| .metadata.annotations["pipelinesascode.tekton.dev/log-url"] + ";," + .metadata.name + ";," + .status.conditions[0].reason' | column -t -s ";")
 
-# echo "$FINAL_OUTPUT"
 
 # adding terminal hyperlinks with awk and colors with sed
 echo "$FINAL_OUTPUT" \
-  | awk -F "," '{
+  | awk -F "," -v hyperlinks="$HYPERLINKS" '{
     url=$1
     pipeline=$2
     pipeline_pad=$2
@@ -85,10 +156,13 @@ echo "$FINAL_OUTPUT" \
     gsub(/ +/,"",pipeline)
     gsub(/ +/,"",url)
     gsub(/[^ ]/,"",pipeline_pad)
-    printf "\033]8;;%s\033\\%s\033]8;;\033\\%s%s\n", url, pipeline, pipeline_pad, status
+    if (hyperlinks == "true") {
+      printf "\033]8;;%s\033\\%s\033]8;;\033\\%s%s\n", url, pipeline, pipeline_pad, status
+    } else {
+      printf "%s%s%s\n", pipeline, pipeline_pad, status
+    }
   }' \
-  | sed -E 's|(Completed.*)$|\x1B[92m\1\x1B[0m|' \
-  | sed -E 's|(PipelineRunTimeout.*)$|\x1B[91m\1\x1B[0m|' \
-  | sed -E 's|(Running.*)$|\x1B[94m\1\x1B[0m|' 
+  | sed -E 's/(Completed|Succeeded)$/\x1B[92m\1\x1B[0m/' \
+  | sed -E 's/(PipelineRunTimeout|Failed)$/\x1B[91m\1\x1B[0m/' \
+  | sed -E 's/(Running.*)$/\x1B[94m\1\x1B[0m/' 
 
-exit 0

@@ -12,7 +12,7 @@ usage: ./konflux-cli [-v] SUBCOMMAND
 SUBCOMMANDS
   app-status [-h] [-o json|table] APP
     APP - the name of the application in konflux 
-    -h, --hyperlinks - add terminal hyperlinks to table display output
+    -l, --hyperlinks - add terminal hyperlinks to table display output
     -o, --output - set output to either json or table
 GLOBAL FLAGS
   -v, --verbose - show more logs in output
@@ -38,7 +38,7 @@ while [ "$#" -gt 0 ]; do
       help
       exit
       ;;
-    --hyperlinks | -h)
+    --hyperlinks | -l)
       HYPERLINKS=true
       shift
       ;;

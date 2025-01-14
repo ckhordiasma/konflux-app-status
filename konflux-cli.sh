@@ -19,7 +19,7 @@ GLOBAL FLAGS
 EXAMPLES
   konflux-cli app-status rhoai-v2-16
   konflux-cli app-status -o json rhoai-v2-16
-  konflux-cli app-status -h rhoai-v2-16  
+  konflux-cli app-status -l rhoai-v2-16  
 DEPENDENCIES
   kubectl, kubelogin
   kubectl context must be configured for kubelogin OIDC and tekton results

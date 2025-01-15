@@ -14,6 +14,10 @@ SUBCOMMANDS
     APP - the name of the application in konflux 
     -l, --hyperlinks - add terminal hyperlinks to table display output
     -o, --output - set output to either json or table
+  rerun COMPONENT | PIPELINERUN | -a APP 
+    COMPONENT - name of the component that needs to be rerun
+    PIPELINERUN - name of a specific pipelinerun to rerun
+    -a, --all-failed-components APP - rerun all failed components of a given APP. 
 GLOBAL FLAGS
   -v, --verbose - show more logs in output
 EXAMPLES
@@ -26,11 +30,19 @@ DEPENDENCIES
 EOF
 }
 
-APP=
+
+#
+# Processing Parameters
+#
+
+CLI_ARG=
 OUTPUT_TYPE=table
 VERBOSE=false
 HYPERLINKS=false
 OPERATION=
+RERUN_ALL_FAILED=false
+RERUN_ARG=
+APP=
 while [ "$#" -gt 0 ]; do
   key="$1"
   case $key in 
@@ -55,27 +67,49 @@ while [ "$#" -gt 0 ]; do
       fi
       shift 2
       ;;
+    app-status | rerun)
+      if [ -z "$OPERATION" ]; then
+        OPERATION="$1"
+      else
+        echo "subcommand $OPERATION was already specified, ignoring $1"
+      fi
+      shift 
+      ;; 
+    -a | --all-failed-components)
+      RERUN_ALL_FAILED=true
+      shift 
+      ;;
     -*)
       echo "unrecognized argument $1"
       help
       exit 1
       ;;
-    app-status)
-      OPERATION="$1"
-      APP="$2"
-      if [ -z "$APP" ]; then
-        echo "please specify an application name"
+    *)
+      if [ -z "$CLI_ARG" ]; then
+        CLI_ARG="$1"
+      else
+        echo "parameter not recognized: $1"
         help
         exit 1
       fi
-      shift 2
-      ;; 
-    *)
       shift
       ;;
   esac
 done
 
+# 
+# Logic for figuring out what CLI_ARG should be assigned to
+#
+
+if [ "$OPERATION" = "app-status" ]; then
+  APP="$CLI_ARG" 
+elif [ "$OPERATION" = "rerun" ]; then
+  if [ "$RERUN_ALL_FAILED" = "true" ]; then
+    APP="$CLI_ARG"
+  else
+    RERUN_ARG="$CLI_ARG"
+  fi 
+fi
 
 function log () {
     if [[ "$VERBOSE" = "true" ]]; then
@@ -88,6 +122,9 @@ if ! $(which kubectl > /dev/null); then
   exit 1 
 fi
 
+# 
+# Parsing kubectl config to get API, context, and other values
+# 
 CONTEXT=$(kubectl config current-context)
 API_QUERY=$(cat <<'EOF'
 (.contexts[] | select(.name==$X) | .context) as $context |
@@ -110,65 +147,142 @@ function get_token() {
   echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
 }
 
+#
+# helper function for rerunning component
+#
+function rerun_component {
+    kubectl annotate component.appstudio.redhat.com "$1" build.appstudio.openshift.io/request=trigger-pac-build
+}
 
-if [ "$OPERATION" = "app-status" ]; then
-  log "Getting components list for $APP..."
-  components=$(kubectl get component -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
+#
+# Helper functions/variables for querying results API
+#
 
-  log "getting pipelines for $APP..."
+# these are query parameters that can be used in get_results
+is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
+not_pull="data.metadata.labels['pipelinesascode.tekton.dev/event-type'] != 'pull_request'"
+is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
 
-  # event-type can be 'incoming' or 'push' for valid builds, so I am using a filter for != pull_request instead
+function get_results {
+  curl -s -k --get \
+    -H "Authorization: Bearer $(get_token)" \
+    -H "Accept: application/json" \
+     --data-urlencode "filter=$2" \
+     --data-urlencode "page_size=$1" \
+     --data-urlencode "order_by=create_time desc" \
+  "$API/parents/$WORKSPACE/results/-/records" | jq -r '.records[] | .data.value' | base64 -d | jq -s -r
+}
+function get_results_debug {
+  curl -s -k --get \
+    -H "Authorization: Bearer $(get_token)" \
+    -H "Accept: application/json" \
+     --data-urlencode "filter=$2" \
+     --data-urlencode "page_size=$1" \
+     --data-urlencode "order_by=create_time desc" \
+  "$API/parents/$WORKSPACE/results/-/records" 
+}
+ 
 
-  is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
-  not_pull="data.metadata.labels['pipelinesascode.tekton.dev/event-type'] != 'pull_request'"
-  is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
+# 
+# Processing rerun of a single component
+#
 
-  app_params="$is_pipeline && $not_pull && $is_app"
-
-  function get_results {
-    curl -s -k --get \
-      -H "Authorization: Bearer $(get_token)" \
-      -H "Accept: application/json" \
-       --data-urlencode "filter=$2" \
-       --data-urlencode "page_size=$1" \
-       --data-urlencode "order_by=create_time desc" \
-    "$API/parents/$WORKSPACE/results/-/records" | jq -r '.records[] | .data.value' | base64 -d | jq -s -r
-  }
-
-  components_json='[]'
-
-  # Call the api in a loop, 50 results at a time. 
-  #  on every loop iteration, fill out $components_json with the most recent component pipeline run,
-  #  and call the api again, but this time adding an additional filter with just the remaining components
-
-  remaining_components="$components"
-  component_params="$app_params"
-  iterations=0
-  while [ -n "$remaining_components" ]; do
-    pipelines=$(get_results 50 "$component_params" k)
-
-    for component in $remaining_components; do
-
-      # the first matching pipeline should be the most recent because of the order_by param in the api call
-      component_pipeline=$(echo $pipelines | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first' )
-      if [ "$component_pipeline" != null ]; then
-        # echo component found: $component
-        remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )
-        components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
-      fi
-    done
-   
-    # produces a combined api query string for all remaining components  
-    is_remaining=$(echo "$remaining_components" | sed -E "s|(.*)|\"data.metadata.labels['appstudio.openshift.io/component']=='\1'\"|" | jq -r -s '. | join(" || ")')
-    component_params="$app_params && ($is_remaining)"
-
-    if [ $iterations -gt 10 ]; then
-      echo "Error: was not able to find all components from the results api. Remaining components:"
-      echo "$remaining_components"
+if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "false" ]; then
+  log "detecting if the rerun argument is a component name"
+  matching_components=$(kubectl get component.appstudio.redhat.com --field-selector metadata.name="$RERUN_ARG" -o json | jq '.items | length')
+  if [ "$matching_components" -eq 1 ]; then 
+    # RERUN_ARG is a component name
+    log "$RERUN_ARG appears to be a component name"
+    RERUN_COMPONENT="$RERUN_ARG"
+  else
+    log "checking if $RERUN_ARG matches a pipelinerun name..."
+    # min page size is 5
+    matching_pipelines=$(get_results 5 "$is_pipeline && data.metadata.name=='$RERUN_ARG'")
+    num_matching=$(jq -r --null-input --argjson X "$matching_pipelines" '$X | length')
+    if [ "$num_matching" -eq 1 ]; then
+      RERUN_COMPONENT=$(jq -r --null-input --argjson X "$matching_pipelines" '$X | .[0].metadata.labels["appstudio.openshift.io/component"]')
+      log "found matching pipeline, setting component to $RERUN_COMPONENT"
+    else 
+      echo "Error: pipelinerun matching $RERUN_ARG not found"
+      exit 1 
     fi
-    iterations=$(($iterations+1))
-  done
+  fi
+  if [ -n "$RERUN_COMPONENT" ]; then
+    log "triggering new pipeline run for $RERUN_COMPONENT..." 
+    rerun_component "$RERUN_COMPONENT"
+  fi 
+  exit 0
+fi
 
+
+#
+# Getting most recent pipelineruns for all components of a given app
+#
+log "Getting components list for $APP..."
+components=$(kubectl get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
+
+log "getting pipelines for $APP..."
+# event-type can be 'incoming' or 'push' for valid builds, so I am using a filter for != pull_request instead
+
+app_params="$is_pipeline && $not_pull && $is_app"
+
+components_json='[]'
+
+# Call the api in a loop, 50 results at a time. 
+#  on every loop iteration, fill out $components_json with the most recent component pipeline run,
+#  and call the api again, but this time adding an additional filter with just the remaining components
+
+remaining_components="$components"
+component_params="$app_params"
+iterations=0
+while [ -n "$remaining_components" ]; do
+  pipelines=$(get_results 50 "$component_params" k)
+
+  for component in $remaining_components; do
+
+    # the first matching pipeline should be the most recent because of the order_by param in the api call
+    component_pipeline=$(echo $pipelines | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first' )
+    if [ "$component_pipeline" != null ]; then
+      # echo component found: $component
+      remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )
+      components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
+    fi
+  done
+ 
+  # produces a combined api query string for all remaining components  
+  is_remaining=$(echo "$remaining_components" | sed -E "s|(.*)|\"data.metadata.labels['appstudio.openshift.io/component']=='\1'\"|" | jq -r -s '. | join(" || ")')
+  component_params="$app_params && ($is_remaining)"
+
+  if [ $iterations -gt 10 ]; then
+    echo "Error: was not able to find all components from the results api. Remaining components:"
+    echo "$remaining_components"
+  fi
+  iterations=$(($iterations+1))
+done
+
+
+#
+# processing output for rerun subcommand, all-failed option
+#
+if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "true" ]; then
+  log "identifying failed components..." 
+  jq_query='
+    .[] | select(
+      .status.conditions[0] | 
+        .reason == "Failed" or .reason == "PipelineRunTimeout" or .reason == "CouldntGetTask" 
+      ) | .metadata.labels["appstudio.openshift.io/component"] 
+  '
+  failed_components=$(echo "$components_json" | jq -r "$jq_query")
+  log "triggering reruns for failed components..."
+  for component in $failed_components; do
+    rerun_component $component
+  done 
+fi
+
+#
+# Processing output for app-status subcommand
+#
+if [ "$OPERATION" = "app-status" ]; then
   if [ $OUTPUT_TYPE = "json" ]; then
     echo "$components_json" | jq -r -M
     exit 0

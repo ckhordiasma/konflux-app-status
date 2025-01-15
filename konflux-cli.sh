@@ -311,5 +311,5 @@ if [ "$OPERATION" = "app-status" ]; then
     }' \
     | sed -E 's/(Completed|Succeeded)$/\x1B[92m\1\x1B[0m/' \
     | sed -E 's/(PipelineRunTimeout|Failed)$/\x1B[91m\1\x1B[0m/' \
-    | sed -E 's/(Running.*)$/\x1B[94m\1\x1B[0m/' 
+    | sed -E 's/(Running|ResolvingTaskRef)$/\x1B[94m\1\x1B[0m/' 
 fi

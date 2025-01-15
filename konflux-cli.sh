@@ -8,7 +8,7 @@ set -e
 
 help() {
 cat << EOF
-usage: ./konflux-cli [-v] SUBCOMMAND
+usage: ./konflux-cli.sh [-v] SUBCOMMAND
 SUBCOMMANDS
   app-status [-h] [-o json|table] APP
     APP - the name of the application in konflux 
@@ -21,9 +21,12 @@ SUBCOMMANDS
 GLOBAL FLAGS
   -v, --verbose - show more logs in output
 EXAMPLES
-  konflux-cli app-status rhoai-v2-16
-  konflux-cli app-status -o json rhoai-v2-16
-  konflux-cli app-status -l rhoai-v2-16  
+  konflux-cli.sh app-status rhoai-v2-16
+  konflux-cli.sh app-status -o json rhoai-v2-16
+  konflux-cli.sh app-status -l rhoai-v2-16  
+  konflux-cli.sh rerun odh-dashboard-v2-17
+  konflux-cli.sh rerun odh-dashboard-v2-17-on-push-ndnj9
+  konflux-cli.sh rerun --all-failed-components rhoai-v2-17
 DEPENDENCIES
   kubectl, kubelogin
   kubectl context must be configured for kubelogin OIDC and tekton results

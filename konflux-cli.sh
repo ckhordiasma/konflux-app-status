@@ -1,8 +1,9 @@
 #!/bin/bash
 
 ## TODO New Features
-# - add pipeline re-triggering subcommand
+#
 # - add logs viewing subcommand 
+# - option to show urls instead of pipelinerun names in app-status
 
 set -e
 

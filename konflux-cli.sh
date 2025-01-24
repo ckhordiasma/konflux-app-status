@@ -139,15 +139,18 @@ API_QUERY=$(cat <<'EOF'
 EOF
 )
 API=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" "$API_QUERY")
-
+log "detected API endpoint: $API"
 if [ -z "$CONTEXT" -o -z "$API" ]; then
   echo "Error: was not able to parse tekton results API from kubectl context. Please make sure your kubectl context is configured correctly"
 fi
 
+
+OIDC_NAME=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.user')
+OIDC_CMD=$(kubectl config view -o json | jq --arg X "$OIDC_NAME" -r '.users[] | select(.name==$X) | .user.exec.args | join(" ")')
+
 WORKSPACE=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.namespace')
 
 function get_token() {
-  OIDC_CMD=$(kubectl config view -o json | jq -r '.users[] | select(.name=="oidc") | .user.exec.args | join(" ")')
   echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
 }
 
@@ -241,7 +244,6 @@ component_params="$app_params"
 iterations=0
 while [ -n "$remaining_components" ]; do
   pipelines=$(get_results 50 "$component_params" k)
-
   for component in $remaining_components; do
 
     # the first matching pipeline should be the most recent because of the order_by param in the api call

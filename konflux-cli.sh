@@ -179,7 +179,9 @@ function get_results {
      --data-urlencode "order_by=create_time desc" \
   "$API/parents/$WORKSPACE/results/-/records" | jq -r '.records[] | .data.value' | base64 -d | jq -s -r
 }
+
 function get_results_debug {
+  echo "running curl against $API/parents/$WORKSPACE/results/-/records" 
   curl -s -k --get \
     -H "Authorization: Bearer $(get_token)" \
     -H "Accept: application/json" \
@@ -227,6 +229,10 @@ fi
 #
 log "Getting components list for $APP..."
 components=$(kubectl get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
+# adding filter to ignore nudge components
+components=$(echo "$components" | sed '/^nudge-only/d')
+
+log "Found components $components"
 
 log "getting pipelines for $APP..."
 # event-type can be 'incoming' or 'push' for valid builds, so I am using a filter for != pull_request instead
@@ -243,7 +249,7 @@ remaining_components="$components"
 component_params="$app_params"
 iterations=0
 while [ -n "$remaining_components" ]; do
-  pipelines=$(get_results 50 "$component_params" k)
+  pipelines=$(get_results 50 "$component_params" )
   for component in $remaining_components; do
 
     # the first matching pipeline should be the most recent because of the order_by param in the api call

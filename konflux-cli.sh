@@ -172,7 +172,7 @@ function get_token() {
 # helper function for rerunning component
 #
 function rerun_component {
-    kubectl annotate component.appstudio.redhat.com "$1" build.appstudio.openshift.io/request=trigger-pac-build
+    kubectl -n "$NAMESPACE" annotate component.appstudio.redhat.com "$1" build.appstudio.openshift.io/request=trigger-pac-build
 }
 
 #
@@ -212,7 +212,7 @@ function get_results_debug {
 
 if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "false" ]; then
   log "detecting if the rerun argument is a component name"
-  matching_components=$(kubectl get component.appstudio.redhat.com --field-selector metadata.name="$RERUN_ARG" -o json | jq '.items | length')
+  matching_components=$(kubectl -n "$NAMESPACE" get component.appstudio.redhat.com --field-selector metadata.name="$RERUN_ARG" -o json | jq '.items | length')
   if [ "$matching_components" -eq 1 ]; then 
     # RERUN_ARG is a component name
     log "$RERUN_ARG appears to be a component name"
@@ -242,7 +242,7 @@ fi
 # Getting most recent pipelineruns for all components of a given app
 #
 log "Getting components list for $APP..."
-components=$(kubectl get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
+components=$(kubectl -n "$NAMESPACE" get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
 # adding filter to ignore nudge components
 components=$(echo "$components" | sed '/^nudge-only/d')
 

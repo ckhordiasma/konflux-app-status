@@ -145,6 +145,7 @@ CONTEXT=$(kubectl config current-context)
 if [ -z "$NAMESPACE" ]; then
   NAMESPACE=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.namespace')
 fi
+
 API_QUERY=$(cat <<'EOF'
 (.contexts[] | select(.name==$X) | .context) as $context |
   (.clusters[] | select(.name==$context.cluster) | .cluster.server)
@@ -163,7 +164,7 @@ fi
 OIDC_NAME=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.user')
 OIDC_CMD=$(kubectl config view -o json | jq --arg X "$OIDC_NAME" -r '.users[] | select(.name==$X) | .user.exec.args | join(" ")')
 
-
+KUBECTL_CMD="kubectl -n $NAMESPACE"
 function get_token() {
   echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
 }
@@ -172,7 +173,7 @@ function get_token() {
 # helper function for rerunning component
 #
 function rerun_component {
-    kubectl -n "$NAMESPACE" annotate component.appstudio.redhat.com "$1" build.appstudio.openshift.io/request=trigger-pac-build
+    $KUBECTL_CMD annotate component.appstudio.redhat.com "$1" build.appstudio.openshift.io/request=trigger-pac-build
 }
 
 #
@@ -214,7 +215,7 @@ function get_results_debug {
 
 if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "false" ]; then
   log "detecting if the rerun argument is a component name"
-  matching_components=$(kubectl -n "$NAMESPACE" get component.appstudio.redhat.com --field-selector metadata.name="$RERUN_ARG" -o json | jq '.items | length')
+  matching_components=$($KUBECTL_CMD get component.appstudio.redhat.com --field-selector metadata.name="$RERUN_ARG" -o json | jq '.items | length')
   if [ "$matching_components" -eq 1 ]; then 
     # RERUN_ARG is a component name
     log "$RERUN_ARG appears to be a component name"
@@ -244,7 +245,7 @@ fi
 # Getting most recent pipelineruns for all components of a given app
 #
 log "Getting components list for $APP..."
-components=$(kubectl -n "$NAMESPACE" get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
+components=$($KUBECTL_CMD get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
 # adding filter to ignore nudge components
 components=$(echo "$components" | sed '/^nudge-only/d')
 
@@ -274,14 +275,14 @@ while [ -n "$remaining_components" ]; do
 
       # retrieves the most recent pipeline from the cluster
       cluster_labels=appstudio.openshift.io/application="$APP",appstudio.openshift.io/component="$component",pipelinesascode.tekton.dev/event-type!="pull_request,pipelines.appstudio.openshift.io/type=build"
-      cluster_component_pipeline_name=$(kubectl -n $NAMESPACE get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
+      cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
 
       # compares the cluster pipeline with the results pipeline and determines which one is newer
       if [ -n "$cluster_component_pipeline_name" ]; then
         component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
-        cluster_component_pipeline_timestamp=$(kubectl -n $NAMESPACE get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
+        cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
         if [ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" ]; then
-          component_pipeline=$(kubectl -n $NAMESPACE get pipelinerun "$cluster_component_pipeline_name" -o json)
+          component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
         fi
       fi
       remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )

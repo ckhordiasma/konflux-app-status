@@ -4,6 +4,8 @@
 #
 # - add logs viewing subcommand 
 # - option to show urls instead of pipelinerun names in app-status
+# - option to set namespace
+# - option to set context
 
 set -e
 
@@ -13,7 +15,7 @@ usage: ./konflux-cli.sh [-v] SUBCOMMAND
 SUBCOMMANDS
   app-status [-h] [-o json|table] APP
     APP - the name of the application in konflux 
-    -l, --hyperlinks - add terminal hyperlinks to table display output
+    -H, --no-hyperlinks - remove terminal hyperlinks from table display output
     -o, --output - set output to either json or table
   rerun COMPONENT | PIPELINERUN | -a APP 
     COMPONENT - name of the component that needs to be rerun
@@ -42,11 +44,12 @@ EOF
 CLI_ARG=
 OUTPUT_TYPE=table
 VERBOSE=false
-HYPERLINKS=false
+HYPERLINKS=true
 OPERATION=
 RERUN_ALL_FAILED=false
 RERUN_ARG=
 APP=
+NAMESPACE=
 while [ "$#" -gt 0 ]; do
   key="$1"
   case $key in 
@@ -54,8 +57,8 @@ while [ "$#" -gt 0 ]; do
       help
       exit
       ;;
-    --hyperlinks | -l)
-      HYPERLINKS=true
+    --no-hyperlinks | -H)
+      HYPERLINKS=false
       shift
       ;;
     -v)
@@ -66,6 +69,15 @@ while [ "$#" -gt 0 ]; do
       OUTPUT_TYPE="$2"
       if [ -z "$OUTPUT_TYPE" ]; then
         echo "please specify an output format of json or table"
+        help
+        exit 1
+      fi
+      shift 2
+      ;;
+    --namespace | -n)
+      NAMESPACE="$2"
+      if [ -z "$NAMESPACE" ]; then
+        echo "please specify a namespace"
         help
         exit 1
       fi
@@ -130,15 +142,18 @@ fi
 # Parsing kubectl config to get API, context, and other values
 # 
 CONTEXT=$(kubectl config current-context)
+if [ -z "$NAMESPACE" ]; then
+  NAMESPACE=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.namespace')
+fi
 API_QUERY=$(cat <<'EOF'
 (.contexts[] | select(.name==$X) | .context) as $context |
   (.clusters[] | select(.name==$context.cluster) | .cluster.server)
   + "/" + ( $context.extensions[] | select(.name=="tekton-results") | .extension["api-path"])
-  + "/workspaces/" + ( $context.namespace | capture("(?<var>.*)-tenant")| .var )
+  + "/workspaces/" + ( $N | capture("(?<var>.*)-tenant")| .var )
   + "/apis/" + ( $context.extensions[] | select(.name=="tekton-results") | .extension["apiVersion"])
 EOF
 )
-API=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" "$API_QUERY")
+API=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" --arg N "$NAMESPACE" "$API_QUERY")
 log "detected API endpoint: $API"
 if [ -z "$CONTEXT" -o -z "$API" ]; then
   echo "Error: was not able to parse tekton results API from kubectl context. Please make sure your kubectl context is configured correctly"
@@ -148,7 +163,6 @@ fi
 OIDC_NAME=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.user')
 OIDC_CMD=$(kubectl config view -o json | jq --arg X "$OIDC_NAME" -r '.users[] | select(.name==$X) | .user.exec.args | join(" ")')
 
-WORKSPACE=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.namespace')
 
 function get_token() {
   echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
@@ -177,18 +191,18 @@ function get_results {
      --data-urlencode "filter=$2" \
      --data-urlencode "page_size=$1" \
      --data-urlencode "order_by=create_time desc" \
-  "$API/parents/$WORKSPACE/results/-/records" | jq -r '.records[] | .data.value' | base64 -d | jq -s -r
+  "$API/parents/$NAMESPACE/results/-/records" | jq -r '.records[] | .data.value' | base64 -d | jq -s -r
 }
 
 function get_results_debug {
-  echo "running curl against $API/parents/$WORKSPACE/results/-/records" 
+  echo "running curl against $API/parents/$NAMESPACE/results/-/records" 
   curl -s -k --get \
     -H "Authorization: Bearer $(get_token)" \
     -H "Accept: application/json" \
      --data-urlencode "filter=$2" \
      --data-urlencode "page_size=$1" \
      --data-urlencode "order_by=create_time desc" \
-  "$API/parents/$WORKSPACE/results/-/records" 
+  "$API/parents/$NAMESPACE/results/-/records" 
 }
  
 

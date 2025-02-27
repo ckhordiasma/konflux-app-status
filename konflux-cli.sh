@@ -282,6 +282,7 @@ while [ -n "$remaining_components" ]; do
   if [ $iterations -gt 10 ]; then
     echo "Error: was not able to find all components from the results api. Remaining components:"
     echo "$remaining_components"
+    break
   fi
   iterations=$(($iterations+1))
 done

@@ -181,6 +181,8 @@ function rerun_component {
 
 # these are query parameters that can be used in get_results
 is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
+
+# event-type can be 'incoming' or 'push' for valid builds, so I am using a filter for != pull_request instead
 not_pull="data.metadata.labels['pipelinesascode.tekton.dev/event-type'] != 'pull_request'"
 is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
 
@@ -249,7 +251,6 @@ components=$(echo "$components" | sed '/^nudge-only/d')
 log "Found components $components"
 
 log "getting pipelines for $APP..."
-# event-type can be 'incoming' or 'push' for valid builds, so I am using a filter for != pull_request instead
 
 app_params="$is_pipeline && $not_pull && $is_app"
 
@@ -270,6 +271,19 @@ while [ -n "$remaining_components" ]; do
     component_pipeline=$(echo $pipelines | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first' )
     if [ "$component_pipeline" != null ]; then
       # echo component found: $component
+
+      # retrieves the most recent pipeline from the cluster
+      cluster_labels=appstudio.openshift.io/application="$APP",appstudio.openshift.io/component="$component",pipelinesascode.tekton.dev/event-type!="pull_request,pipelines.appstudio.openshift.io/type=build"
+      cluster_component_pipeline_name=$(kubectl -n $NAMESPACE get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
+
+      # compares the cluster pipeline with the results pipeline and determines which one is newer
+      if [ -n "$cluster_component_pipeline_name" ]; then
+        component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
+        cluster_component_pipeline_timestamp=$(kubectl -n $NAMESPACE get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
+        if [ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" ]; then
+          component_pipeline=$(kubectl -n $NAMESPACE get pipelinerun "$cluster_component_pipeline_name" -o json)
+        fi
+      fi
       remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )
       components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
     fi

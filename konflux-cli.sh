@@ -194,7 +194,7 @@ function get_results {
      --data-urlencode "filter=$2" \
      --data-urlencode "page_size=$1" \
      --data-urlencode "order_by=create_time desc" \
-  "$API/parents/$NAMESPACE/results/-/records" | jq -r '.records[] | .data.value' | base64 -d | jq -s -r
+  "$API/parents/$NAMESPACE/results/-/records" | jq -r '.records[]? | .data.value' | base64 -d | jq -s -r
 }
 
 function get_results_debug {
@@ -263,9 +263,10 @@ components_json='[]'
 
 remaining_components="$components"
 component_params="$app_params"
-iterations=0
+total_duration=0
 while [ -n "$remaining_components" ]; do
-  pipelines=$(get_results 50 "$component_params" )
+  start_time=$(date '+%s')
+  pipelines=$(get_results 15 "$component_params" )
   if [ "$pipelines" = "[]" ]; then
     echo "Error: was not able to find runs for all components from the results api. Missing components:"
     echo $remaining_components
@@ -299,9 +300,13 @@ while [ -n "$remaining_components" ]; do
   is_remaining=$(echo "$remaining_components" | sed -E "s|(.*)|\"data.metadata.labels['appstudio.openshift.io/component']=='\1'\"|" | jq -r -s '. | join(" || ")')
   component_params="$app_params && ($is_remaining)"
 
-  iterations=$(($iterations+1))
+  end_time=$(date '+%s')
+  duration=$(($end_time - $start_time))
+  log "iteration duration: $duration seconds"
+  total_duration=$(( $total_duration + $duration ))
 done
 
+log "total duration: $total_duration seconds"
 
 #
 # processing output for rerun subcommand, all-failed option

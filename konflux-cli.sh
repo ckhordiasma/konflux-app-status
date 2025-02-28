@@ -247,7 +247,7 @@ fi
 log "Getting components list for $APP..."
 components=$($KUBECTL_CMD get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
 # adding filter to ignore nudge components
-components=$(echo "$components" | sed '/^nudge-only/d')
+# components=$(echo "$components" | sed '/^nudge-only/d')
 
 log "Found components $components"
 
@@ -266,6 +266,11 @@ component_params="$app_params"
 iterations=0
 while [ -n "$remaining_components" ]; do
   pipelines=$(get_results 50 "$component_params" )
+  if [ "$pipelines" = "[]" ]; then
+    echo "Error: was not able to find runs for all components from the results api. Missing components:"
+    echo $remaining_components
+    break
+  fi
   for component in $remaining_components; do
 
     # the first matching pipeline should be the most recent because of the order_by param in the api call
@@ -281,7 +286,7 @@ while [ -n "$remaining_components" ]; do
       if [ -n "$cluster_component_pipeline_name" ]; then
         component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
         cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
-        if [ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" ]; then
+        if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" ]]; then
           component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
         fi
       fi
@@ -294,11 +299,6 @@ while [ -n "$remaining_components" ]; do
   is_remaining=$(echo "$remaining_components" | sed -E "s|(.*)|\"data.metadata.labels['appstudio.openshift.io/component']=='\1'\"|" | jq -r -s '. | join(" || ")')
   component_params="$app_params && ($is_remaining)"
 
-  if [ $iterations -gt 10 ]; then
-    echo "Error: was not able to find all components from the results api. Remaining components:"
-    echo "$remaining_components"
-    break
-  fi
   iterations=$(($iterations+1))
 done
 

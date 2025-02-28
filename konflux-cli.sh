@@ -17,6 +17,7 @@ SUBCOMMANDS
     APP - the name of the application in konflux 
     -H, --no-hyperlinks - remove terminal hyperlinks from table display output
     -o, --output - set output to either json or table
+    -w, --watch - watch output
   rerun COMPONENT | PIPELINERUN | -a APP 
     COMPONENT - name of the component that needs to be rerun
     PIPELINERUN - name of a specific pipelinerun to rerun
@@ -41,6 +42,8 @@ EOF
 # Processing Parameters
 #
 
+ORIGINAL_ARGS=$@
+
 CLI_ARG=
 OUTPUT_TYPE=table
 VERBOSE=false
@@ -50,6 +53,7 @@ RERUN_ALL_FAILED=false
 RERUN_ARG=
 APP=
 NAMESPACE=
+WATCH=false
 while [ "$#" -gt 0 ]; do
   key="$1"
   case $key in 
@@ -82,6 +86,10 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       shift 2
+      ;;
+    --watch | -w)
+      WATCH=true
+      shift
       ;;
     app-status | rerun)
       if [ -z "$OPERATION" ]; then
@@ -337,9 +345,10 @@ if [ "$OPERATION" = "app-status" ]; then
 
   log "formatting output..."
   # using semicolon as the delimiter for column command, and comma as delimiter for awk (for adding terminal hyperlinks)
-  FINAL_OUTPUT=$(echo "$components_json" | jq -r '.[]| .metadata.annotations["pipelinesascode.tekton.dev/log-url"] + ";," + .metadata.name + ";," + .status.conditions[0].reason' | column -t -s ";")
+  FINAL_OUTPUT=$(echo "$components_json" | jq -r '.[]| .metadata.annotations["pipelinesascode.tekton.dev/log-url"] + ";," + .metadata.name + ";," + .status.conditions[0].reason' | sed '1s/^/PIPELINE RUN URL;,PIPELINE RUN;,STATUS\n/' |column -t -s ";")
 
 
+  if [ "$WATCH" = true ]; then clear; fi
   # adding terminal hyperlinks with awk and colors with sed
   echo "$FINAL_OUTPUT" \
     | awk -F "," -v hyperlinks="$HYPERLINKS" '{
@@ -359,4 +368,8 @@ if [ "$OPERATION" = "app-status" ]; then
     | sed -E 's/(Completed|Succeeded)$/\x1B[92m\1\x1B[0m/' \
     | sed -E 's/(PipelineRunTimeout|Failed)$/\x1B[91m\1\x1B[0m/' \
     | sed -E 's/(Running|ResolvingTaskRef)$/\x1B[94m\1\x1B[0m/' 
+
+  if [ "$WATCH" = true ]; then $0 $ORIGINAL_ARGS; fi
+
 fi
+

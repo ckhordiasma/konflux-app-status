@@ -156,7 +156,7 @@ fi
 
 API_QUERY=$(cat <<'EOF'
 (.contexts[] | select(.name==$X) | .context) as $context |
-  (.clusters[] | select(.name==$context.cluster) | .cluster.server)
+  (.clusters[] | select(.name==$context.cluster) | .cluster.server | match("^(https?://.*?)(/.*)*$").captures[0].string)
   + "/" + ( $context.extensions[] | select(.name=="tekton-results") | .extension["api-path"])
   + "/workspaces/" + ( $N | capture("(?<var>.*)-tenant")| .var )
   + "/apis/" + ( $context.extensions[] | select(.name=="tekton-results") | .extension["apiVersion"])

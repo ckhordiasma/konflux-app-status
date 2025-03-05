@@ -295,7 +295,8 @@ while [ -n "$remaining_components" ]; do
       if [ -n "$cluster_component_pipeline_name" ]; then
         component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
         cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
-        if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" ]]; then
+        # greater than or equal because we prefer the cluster one over the results API one
+        if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
           component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
         fi
       fi

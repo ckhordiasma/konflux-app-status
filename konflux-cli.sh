@@ -24,6 +24,8 @@ SUBCOMMANDS
     -a, --all-failed-components APP - rerun all failed components of a given APP. 
 GLOBAL FLAGS
   -v, --verbose - show more logs in output
+  -c, --context - specify kubectl context name
+  -n, --namespace - specify kubernetes namespace
 EXAMPLES
   konflux-cli.sh app-status rhoai-v2-16
   konflux-cli.sh app-status -o json rhoai-v2-16
@@ -53,6 +55,7 @@ RERUN_ALL_FAILED=false
 RERUN_ARG=
 APP=
 NAMESPACE=
+CONTEXT=
 WATCH=false
 while [ "$#" -gt 0 ]; do
   key="$1"
@@ -82,6 +85,15 @@ while [ "$#" -gt 0 ]; do
       NAMESPACE="$2"
       if [ -z "$NAMESPACE" ]; then
         echo "please specify a namespace"
+        help
+        exit 1
+      fi
+      shift 2
+      ;;
+    --context | -c)
+      CONTEXT="$2"
+      if [ -z "$CONTEXT" ]; then
+        echo "please specify a kubectl context"
         help
         exit 1
       fi
@@ -149,7 +161,9 @@ fi
 # 
 # Parsing kubectl config to get API, context, and other values
 # 
-CONTEXT=$(kubectl config current-context)
+if [ -z "$CONTEXT" ]; then
+  CONTEXT=$(kubectl config current-context)
+fi
 if [ -z "$NAMESPACE" ]; then
   NAMESPACE=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.namespace')
 fi
@@ -172,7 +186,7 @@ fi
 OIDC_NAME=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.user')
 OIDC_CMD=$(kubectl config view -o json | jq --arg X "$OIDC_NAME" -r '.users[] | select(.name==$X) | .user.exec.args | join(" ")')
 
-KUBECTL_CMD="kubectl -n $NAMESPACE"
+KUBECTL_CMD="kubectl -n $NAMESPACE --context $CONTEXT"
 function get_token() {
   echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
 }

@@ -205,8 +205,9 @@ function rerun_component {
 # these are query parameters that can be used in get_results
 is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
 
-# event-type can be 'incoming' or 'push' for valid builds, so I am using a filter for != pull_request instead
-not_pull="data.metadata.labels['pipelinesascode.tekton.dev/event-type'] != 'pull_request'"
+not_pull="!data.metadata.labels.contains('pipelinesascode.tekton.dev/pull-request')"
+# need is_build to filter out conforma and other integrationtest pipelineruns
+is_build="data.metadata.labels['pipelines.appstudio.openshift.io/type']=='build'"
 is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
 
 function get_results {
@@ -275,7 +276,7 @@ log "Found components $components"
 
 log "getting pipelines for $APP..."
 
-app_params="$is_pipeline && $not_pull && $is_app"
+app_params="$is_pipeline && $not_pull && $is_app && $is_build"
 
 components_json='[]'
 

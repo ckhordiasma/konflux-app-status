@@ -170,10 +170,9 @@ fi
 
 API_QUERY=$(cat <<'EOF'
 (.contexts[] | select(.name==$X) | .context) as $context |
-  (.clusters[] | select(.name==$context.cluster) | .cluster.server | match("^(https?://.*?)(/.*)*$").captures[0].string)
-  + "/" + ( $context.extensions[] | select(.name=="tekton-results") | .extension["api-path"])
-  + "/workspaces/" + ( $N | capture("(?<var>.*)-tenant")| .var )
-  + "/apis/" + ( $context.extensions[] | select(.name=="tekton-results") | .extension["apiVersion"])
+  "https://tekton-results-tekton-results.apps"
+  + (.clusters[] | select(.name==$context.cluster) | .cluster.server | match("^https?://api(.*?)([/:].*)*$").captures[0].string)
+  + "/apis/results.tekton.dev/v1alpha2" 
 EOF
 )
 API=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" --arg N "$NAMESPACE" "$API_QUERY")
@@ -183,12 +182,13 @@ if [ -z "$CONTEXT" -o -z "$API" ]; then
 fi
 
 
-OIDC_NAME=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.user')
-OIDC_CMD=$(kubectl config view -o json | jq --arg X "$OIDC_NAME" -r '.users[] | select(.name==$X) | .user.exec.args | join(" ")')
+USER_NAME=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.user')
+# OIDC_CMD=$(kubectl config view -o json | jq --arg X "$OIDC_NAME" -r '.users[] | select(.name==$X) | .user.exec.args | join(" ")')
 
 KUBECTL_CMD="kubectl -n $NAMESPACE --context $CONTEXT"
 function get_token() {
-  echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
+  # echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
+  kubectl config view -o json --raw | jq -r --arg X "$USER_NAME" '.users[] | select(.name==$X) | .user.token'
 }
 
 #

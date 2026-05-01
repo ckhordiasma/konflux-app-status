@@ -22,6 +22,7 @@ SUBCOMMANDS
     COMPONENT - name of the component that needs to be rerun
     PIPELINERUN - name of a specific pipelinerun to rerun
     -a, --all-failed-components APP - rerun all failed components of a given APP.
+    -f, --force - when used with -a, retrigger all components, not just failed ones
 GLOBAL FLAGS
   -v, --verbose - show more logs in output
   -c, --context - specify kubectl context name
@@ -53,6 +54,7 @@ VERBOSE=false
 HYPERLINKS=true
 OPERATION=
 RERUN_ALL_FAILED=false
+RERUN_FORCE=false
 RERUN_ARG=
 APP=
 NAMESPACE=
@@ -125,6 +127,9 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       shift 2
+    -f | --force)
+      RERUN_FORCE=true
+      shift
       ;;
     -*)
       echo "unrecognized argument $1"
@@ -149,13 +154,18 @@ done
 #
 
 if [ "$OPERATION" = "app-status" ]; then
-  APP="$CLI_ARG" 
+  APP="$CLI_ARG"
 elif [ "$OPERATION" = "rerun" ]; then
+  if [ "$RERUN_FORCE" = "true" -a "$RERUN_ALL_FAILED" = "false" ]; then
+    echo "--force can only be used with -a/--all-failed-components"
+    help
+    exit 1
+  fi
   if [ "$RERUN_ALL_FAILED" = "true" ]; then
     APP="$CLI_ARG"
   else
     RERUN_ARG="$CLI_ARG"
-  fi 
+  fi
 fi
 
 function log () {
@@ -394,18 +404,23 @@ fi
 # processing output for rerun subcommand, all-failed option
 #
 if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "true" ]; then
-  log "identifying failed components..." 
-  jq_query='
-    .[] | select(
-      .status.conditions[0] | 
-        .reason == "Failed" or .reason == "PipelineRunTimeout" or .reason == "CouldntGetTask" 
-      ) | .metadata.labels["appstudio.openshift.io/component"] 
-  '
-  failed_components=$(echo "$components_json" | jq -r "$jq_query")
-  log "triggering reruns for failed components..."
-  for component in $failed_components; do
+  if [ "$RERUN_FORCE" = "true" ]; then
+    log "force retriggering all components..."
+    rerun_components=$(echo "$components_json" | jq -r '.[] | .metadata.labels["appstudio.openshift.io/component"]')
+  else
+    log "identifying failed components..."
+    jq_query='
+      .[] | select(
+        .status.conditions[0] |
+          .reason == "Failed" or .reason == "PipelineRunTimeout" or .reason == "CouldntGetTask"
+        ) | .metadata.labels["appstudio.openshift.io/component"]
+    '
+    rerun_components=$(echo "$components_json" | jq -r "$jq_query")
+  fi
+  log "triggering reruns..."
+  for component in $rerun_components; do
     rerun_component $component
-  done 
+  done
 fi
 
 #

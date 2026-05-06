@@ -127,6 +127,7 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       shift 2
+      ;;
     -f | --force)
       RERUN_FORCE=true
       shift
@@ -201,6 +202,7 @@ fi
 
 if [ -z "$CONTEXT" -o -z "$API" ]; then
   echo "Error: was not able to parse API endpoint from kubectl context. Please make sure your kubectl context is configured correctly"
+  exit 1
 fi
 
 
@@ -370,7 +372,7 @@ else
       if [ "$component_pipeline" != null ]; then
 
         # retrieves the most recent pipeline from the cluster
-        cluster_labels=appstudio.openshift.io/application="$APP",appstudio.openshift.io/component="$component",pipelinesascode.tekton.dev/event-type!="pull_request,pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
+        cluster_labels="appstudio.openshift.io/application=${APP},appstudio.openshift.io/component=${component},pipelinesascode.tekton.dev/event-type!=pull_request,pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
         cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
 
         # compares the cluster pipeline with the results pipeline and determines which one is newer
@@ -458,7 +460,7 @@ if [ "$OPERATION" = "app-status" ]; then
     | sed -E 's/(PipelineRunTimeout|Failed)$/\x1B[91m\1\x1B[0m/' \
     | sed -E 's/(Running|ResolvingTaskRef)$/\x1B[94m\1\x1B[0m/' 
 
-  if [ "$WATCH" = true ]; then $0 $ORIGINAL_ARGS; fi
+  if [ "$WATCH" = true ]; then exec "$0" $ORIGINAL_ARGS; fi
 
 fi
 

@@ -18,14 +18,15 @@ SUBCOMMANDS
     -H, --no-hyperlinks - remove terminal hyperlinks from table display output
     -o, --output - set output to either json or table
     -w, --watch - watch output
-  rerun COMPONENT | PIPELINERUN | -a APP 
+  rerun COMPONENT | PIPELINERUN | -a APP
     COMPONENT - name of the component that needs to be rerun
     PIPELINERUN - name of a specific pipelinerun to rerun
-    -a, --all-failed-components APP - rerun all failed components of a given APP. 
+    -a, --all-failed-components APP - rerun all failed components of a given APP.
 GLOBAL FLAGS
   -v, --verbose - show more logs in output
   -c, --context - specify kubectl context name
   -n, --namespace - specify kubernetes namespace
+  --results - set results backend: kubearchive (default) or tekton-results
 EXAMPLES
   konflux-cli.sh app-status rhoai-v2-16
   konflux-cli.sh app-status -o json rhoai-v2-16
@@ -57,6 +58,7 @@ APP=
 NAMESPACE=
 CONTEXT=
 WATCH=false
+RESULTS_BACKEND=kubearchive
 while [ "$#" -gt 0 ]; do
   key="$1"
   case $key in 
@@ -113,7 +115,16 @@ while [ "$#" -gt 0 ]; do
       ;; 
     -a | --all-failed-components)
       RERUN_ALL_FAILED=true
-      shift 
+      shift
+      ;;
+    --results)
+      RESULTS_BACKEND="$2"
+      if [ "$RESULTS_BACKEND" != "kubearchive" -a "$RESULTS_BACKEND" != "tekton-results" ]; then
+        echo "invalid results backend: $RESULTS_BACKEND (must be kubearchive or tekton-results)"
+        help
+        exit 1
+      fi
+      shift 2
       ;;
     -*)
       echo "unrecognized argument $1"
@@ -168,17 +179,18 @@ if [ -z "$NAMESPACE" ]; then
   NAMESPACE=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '.contexts[] | select(.name==$X) | .context.namespace')
 fi
 
-API_QUERY=$(cat <<'EOF'
-(.contexts[] | select(.name==$X) | .context) as $context |
-  "https://tekton-results-tekton-results.apps"
-  + (.clusters[] | select(.name==$context.cluster) | .cluster.server | match("^https?://api(.*?)([/:].*)*$").captures[0].string)
-  + "/apis/results.tekton.dev/v1alpha2" 
-EOF
-)
-API=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" --arg N "$NAMESPACE" "$API_QUERY")
-log "detected API endpoint: $API"
+CLUSTER_SUFFIX=$(kubectl config view -o json | jq -r --arg X "$CONTEXT" '(.contexts[] | select(.name==$X) | .context) as $context | .clusters[] | select(.name==$context.cluster) | .cluster.server | match("^https?://api(.*?)([/:].*)*$").captures[0].string')
+
+if [ "$RESULTS_BACKEND" = "tekton-results" ]; then
+  API="https://tekton-results-tekton-results.apps${CLUSTER_SUFFIX}/apis/results.tekton.dev/v1alpha2"
+  log "detected tekton results API endpoint: $API"
+elif [ "$RESULTS_BACKEND" = "kubearchive" ]; then
+  API="https://kubearchive-api-server-product-kubearchive.apps${CLUSTER_SUFFIX}"
+  log "detected kubearchive API endpoint: $API"
+fi
+
 if [ -z "$CONTEXT" -o -z "$API" ]; then
-  echo "Error: was not able to parse tekton results API from kubectl context. Please make sure your kubectl context is configured correctly"
+  echo "Error: was not able to parse API endpoint from kubectl context. Please make sure your kubectl context is configured correctly"
 fi
 
 
@@ -202,13 +214,13 @@ function rerun_component {
 # Helper functions/variables for querying results API
 #
 
-# these are query parameters that can be used in get_results
-is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
-
-not_pull="!data.metadata.labels.contains('pipelinesascode.tekton.dev/pull-request')"
-# need is_build to filter out conforma and other integrationtest pipelineruns
-is_build="data.metadata.labels['pipelines.appstudio.openshift.io/type']=='build'"
-is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
+if [ "$RESULTS_BACKEND" = "tekton-results" ]; then
+  # CEL filter expressions for tekton results
+  is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
+  not_pull="!data.metadata.labels.contains('pipelinesascode.tekton.dev/pull-request')"
+  is_build="data.metadata.labels['pipelines.appstudio.openshift.io/type']=='build'"
+  is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
+fi
 
 function get_results {
   curl -s -k --get \
@@ -221,14 +233,28 @@ function get_results {
 }
 
 function get_results_debug {
-  echo "running curl against $API/parents/$NAMESPACE/results/-/records" 
+  echo "running curl against $API/parents/$NAMESPACE/results/-/records"
   curl -s -k --get \
     -H "Authorization: Bearer $(get_token)" \
     -H "Accept: application/json" \
      --data-urlencode "filter=$2" \
      --data-urlencode "page_size=$1" \
      --data-urlencode "order_by=create_time desc" \
-  "$API/parents/$NAMESPACE/results/-/records" 
+  "$API/parents/$NAMESPACE/results/-/records"
+}
+
+function get_kubearchive_results {
+  local label_selector="$1"
+  local limit="${2:-100}"
+  local continue_token="$3"
+  local url="$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/pipelineruns"
+  local query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
+  if [ -n "$continue_token" ]; then
+    query="${query}&continue=$continue_token"
+  fi
+  curl -s -k \
+    -H "Authorization: Bearer $(get_token)" \
+    "$url?$query"
 }
  
 
@@ -276,61 +302,93 @@ log "Found components $components"
 
 log "getting pipelines for $APP..."
 
-app_params="$is_pipeline && $not_pull && $is_app && $is_build"
-
 components_json='[]'
 
-# Call the api in a loop, 50 results at a time. 
-#  on every loop iteration, fill out $components_json with the most recent component pipeline run,
-#  and call the api again, but this time adding an additional filter with just the remaining components
-
-remaining_components="$components"
-component_params="$app_params"
-total_duration=0
-while [ -n "$remaining_components" ]; do
+if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
   start_time=$(date '+%s')
-  pipelines=$(get_results 15 "$component_params" )
-  if [ "$pipelines" = "[]" ]; then
-    echo "Error: was not able to find runs for all components from the results api. Missing components:"
-    echo $remaining_components
-    break
-  fi
-  for component in $remaining_components; do
+  ka_tmp_dir=$(mktemp -d)
 
-    # the first matching pipeline should be the most recent because of the order_by param in the api call
-    component_pipeline=$(echo $pipelines | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first' )
-    if [ "$component_pipeline" != null ]; then
-      # echo component found: $component
+  for component in $components; do
+    (
+      label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request,appstudio.openshift.io/component=${component}"
+      get_kubearchive_results "$label_selector" 1 | jq '.items[0] // empty' > "${ka_tmp_dir}/${component}.json"
+    ) &
+  done
+  wait
 
-      # retrieves the most recent pipeline from the cluster
-      cluster_labels=appstudio.openshift.io/application="$APP",appstudio.openshift.io/component="$component",pipelinesascode.tekton.dev/event-type!="pull_request,pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
-      cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
-
-      # compares the cluster pipeline with the results pipeline and determines which one is newer
-      if [ -n "$cluster_component_pipeline_name" ]; then
-        component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
-        cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
-        # greater than or equal because we prefer the cluster one over the results API one
-        if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
-          component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
-        fi
+  for component in $components; do
+    result_file="${ka_tmp_dir}/${component}.json"
+    if [ -s "$result_file" ]; then
+      component_pipeline=$(cat "$result_file")
+      if [ -n "$component_pipeline" -a "$component_pipeline" != "null" ]; then
+        components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
+      else
+        log "warning: no pipeline found for component $component"
       fi
-      remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )
-      components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
+    else
+      log "warning: no pipeline found for component $component"
     fi
   done
- 
-  # produces a combined api query string for all remaining components  
-  is_remaining=$(echo "$remaining_components" | sed -E "s|(.*)|\"data.metadata.labels['appstudio.openshift.io/component']=='\1'\"|" | jq -r -s '. | join(" || ")')
-  component_params="$app_params && ($is_remaining)"
+  rm -rf "$ka_tmp_dir"
 
   end_time=$(date '+%s')
   duration=$(($end_time - $start_time))
-  log "iteration duration: $duration seconds"
-  total_duration=$(( $total_duration + $duration ))
-done
+  log "kubearchive query duration: $duration seconds"
 
-log "total duration: $total_duration seconds"
+else
+  app_params="$is_pipeline && $not_pull && $is_app && $is_build"
+
+  # Call the api in a loop, 50 results at a time.
+  #  on every loop iteration, fill out $components_json with the most recent component pipeline run,
+  #  and call the api again, but this time adding an additional filter with just the remaining components
+
+  remaining_components="$components"
+  component_params="$app_params"
+  total_duration=0
+  while [ -n "$remaining_components" ]; do
+    start_time=$(date '+%s')
+    pipelines=$(get_results 15 "$component_params" )
+    if [ "$pipelines" = "[]" ]; then
+      echo "Error: was not able to find runs for all components from the results api. Missing components:"
+      echo $remaining_components
+      break
+    fi
+    for component in $remaining_components; do
+
+      # the first matching pipeline should be the most recent because of the order_by param in the api call
+      component_pipeline=$(echo $pipelines | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first' )
+      if [ "$component_pipeline" != null ]; then
+
+        # retrieves the most recent pipeline from the cluster
+        cluster_labels=appstudio.openshift.io/application="$APP",appstudio.openshift.io/component="$component",pipelinesascode.tekton.dev/event-type!="pull_request,pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
+        cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
+
+        # compares the cluster pipeline with the results pipeline and determines which one is newer
+        if [ -n "$cluster_component_pipeline_name" ]; then
+          component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
+          cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
+          # greater than or equal because we prefer the cluster one over the results API one
+          if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
+            component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
+          fi
+        fi
+        remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )
+        components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
+      fi
+    done
+
+    # produces a combined api query string for all remaining components
+    is_remaining=$(echo "$remaining_components" | sed -E "s|(.*)|\"data.metadata.labels['appstudio.openshift.io/component']=='\1'\"|" | jq -r -s '. | join(" || ")')
+    component_params="$app_params && ($is_remaining)"
+
+    end_time=$(date '+%s')
+    duration=$(($end_time - $start_time))
+    log "iteration duration: $duration seconds"
+    total_duration=$(( $total_duration + $duration ))
+  done
+
+  log "total duration: $total_duration seconds"
+fi
 
 #
 # processing output for rerun subcommand, all-failed option

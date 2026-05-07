@@ -69,7 +69,7 @@ APP=
 NAMESPACE=
 CONTEXT=
 WATCH=false
-RESULTS_BACKEND=kubearchive
+RESULTS_BACKEND=tekton-results
 while [ "$#" -gt 0 ]; do
   key="$1"
   case $key in 
@@ -248,7 +248,7 @@ function rerun_component {
 if [ "$RESULTS_BACKEND" = "tekton-results" ]; then
   # CEL filter expressions for tekton results
   is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
-  not_pull="!data.metadata.labels.contains('pipelinesascode.tekton.dev/pull-request')"
+  not_pull="data.metadata.labels['pipelinesascode.tekton.dev/event-type']!='pull_request'"
   is_build="data.metadata.labels['pipelines.appstudio.openshift.io/type']=='build'"
   is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
 fi
@@ -278,10 +278,14 @@ function get_kubearchive_results {
   local label_selector="$1"
   local limit="${2:-100}"
   local continue_token="$3"
+  local created_after="$4"
   local url="$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/pipelineruns"
   local query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
   if [ -n "$continue_token" ]; then
     query="${query}&continue=$continue_token"
+  fi
+  if [ -n "$created_after" ]; then
+    query="${query}&creationTimestampAfter=$created_after"
   fi
   curl -s -k \
     -H "Authorization: Bearer $(get_token)" \
@@ -361,14 +365,16 @@ if [ "$OPERATION" = "logs" ]; then
     component_app=$($KUBECTL_CMD get component.appstudio.redhat.com "$LOGS_ARG" -o jsonpath='{.spec.application}')
 
     # Try on-cluster first
-    cluster_labels="appstudio.openshift.io/application=${component_app},appstudio.openshift.io/component=${LOGS_ARG},pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
+    cluster_labels="appstudio.openshift.io/application=${component_app},appstudio.openshift.io/component=${LOGS_ARG},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type!=pull_request"
     LOGS_PR_NAME=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
 
     if [ -z "$LOGS_PR_NAME" ]; then
       log "no on-cluster pipelinerun found, querying backend..."
       if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
-        label_selector="appstudio.openshift.io/application=${component_app},appstudio.openshift.io/component=${LOGS_ARG},pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
-        LOGS_PR_JSON=$(get_kubearchive_results "$label_selector" 1 | jq '.items[0] // empty')
+        label_selector="appstudio.openshift.io/application=${component_app},appstudio.openshift.io/component=${LOGS_ARG},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request)"
+        local ka_since
+        ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
+        LOGS_PR_JSON=$(get_kubearchive_results "$label_selector" 100 "" "$ka_since" | jq '[.items[] | select(.metadata.creationTimestamp != null)] | sort_by(.metadata.creationTimestamp) | last // empty')
         LOGS_PR_NAME=$(echo "$LOGS_PR_JSON" | jq -r '.metadata.name // empty')
       elif [ "$RESULTS_BACKEND" = "tekton-results" ]; then
         is_component="data.metadata.labels['appstudio.openshift.io/component']=='$LOGS_ARG'"
@@ -639,14 +645,17 @@ log "getting pipelines for $APP..."
 
 components_json='[]'
 
+# There is sometimes a discrepancy between kubearchive and tekton-results;
+# tekton-results is preferred as the potentially more stable backend.
 if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
   start_time=$(date '+%s')
   ka_tmp_dir=$(mktemp -d)
 
   for component in $components; do
     (
-      label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request,appstudio.openshift.io/component=${component}"
-      get_kubearchive_results "$label_selector" 1 | jq '.items[0] // empty' > "${ka_tmp_dir}/${component}.json"
+      label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request),appstudio.openshift.io/component=${component}"
+      ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
+      get_kubearchive_results "$label_selector" 100 "" "$ka_since" | jq '[.items[] | select(.metadata.creationTimestamp != null)] | sort_by(.metadata.creationTimestamp) | last // empty' > "${ka_tmp_dir}/${component}.json"
     ) &
   done
   wait
@@ -693,20 +702,6 @@ else
       # the first matching pipeline should be the most recent because of the order_by param in the api call
       component_pipeline=$(echo $pipelines | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first' )
       if [ "$component_pipeline" != null ]; then
-
-        # retrieves the most recent pipeline from the cluster
-        cluster_labels="appstudio.openshift.io/application=${APP},appstudio.openshift.io/component=${component},pipelinesascode.tekton.dev/event-type!=pull_request,pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
-        cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
-
-        # compares the cluster pipeline with the results pipeline and determines which one is newer
-        if [ -n "$cluster_component_pipeline_name" ]; then
-          component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
-          cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
-          # greater than or equal because we prefer the cluster one over the results API one
-          if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
-            component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
-          fi
-        fi
         remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )
         components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
       fi
@@ -724,6 +719,26 @@ else
 
   log "total duration: $total_duration seconds"
 fi
+
+# Compare each component's backend result with on-cluster pipelineruns and use the newer one
+updated_json='[]'
+for component in $components; do
+  component_pipeline=$(echo "$components_json" | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first // empty')
+  if [ -z "$component_pipeline" ] || [ "$component_pipeline" = "null" ]; then
+    continue
+  fi
+  cluster_labels="appstudio.openshift.io/application=${APP},appstudio.openshift.io/component=${component},pipelinesascode.tekton.dev/event-type!=pull_request,pipelines.appstudio.openshift.io/type=build"
+  cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
+  if [ -n "$cluster_component_pipeline_name" ]; then
+    component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
+    cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
+    if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
+      component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
+    fi
+  fi
+  updated_json=$(echo "$updated_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
+done
+components_json="$updated_json"
 
 #
 # processing output for rerun subcommand, all-failed option

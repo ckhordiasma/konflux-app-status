@@ -2,10 +2,7 @@
 
 ## TODO New Features
 #
-# - add logs viewing subcommand 
 # - option to show urls instead of pipelinerun names in app-status
-# - option to set namespace
-# - option to set context
 
 set -e
 
@@ -18,6 +15,11 @@ SUBCOMMANDS
     -H, --no-hyperlinks - remove terminal hyperlinks from table display output
     -o, --output - set output to either json or table
     -w, --watch - watch output
+  logs COMPONENT | PIPELINERUN
+    COMPONENT - name of the component to get logs for (uses latest pipelinerun)
+    PIPELINERUN - name of a specific pipelinerun to get logs for
+    --url - print the log URL instead of streaming log text
+    --all - show logs for all tasks (default: only failed tasks)
   rerun COMPONENT | PIPELINERUN | -a APP
     COMPONENT - name of the component that needs to be rerun
     PIPELINERUN - name of a specific pipelinerun to rerun
@@ -27,7 +29,7 @@ GLOBAL FLAGS
   -v, --verbose - show more logs in output
   -c, --context - specify kubectl context name
   -n, --namespace - specify kubernetes namespace
-  --results - set results backend: kubearchive (default) or tekton-results
+  --results - set results backend: tekton-results (default) or kubearchive
 EXAMPLES
   konflux-cli.sh app-status rhoai-v2-16
   konflux-cli.sh app-status -o json rhoai-v2-16
@@ -35,6 +37,10 @@ EXAMPLES
   konflux-cli.sh rerun odh-dashboard-v2-17
   konflux-cli.sh rerun odh-dashboard-v2-17-on-push-ndnj9
   konflux-cli.sh rerun --all-failed-components rhoai-v2-17
+  konflux-cli.sh logs odh-dashboard-v2-17
+  konflux-cli.sh logs odh-dashboard-v2-17-on-push-ndnj9
+  konflux-cli.sh logs --url odh-dashboard-v2-17
+  konflux-cli.sh logs --all odh-dashboard-v2-17
 DEPENDENCIES
   kubectl, kubelogin
   kubectl context must be configured for kubelogin OIDC and tekton results
@@ -56,11 +62,14 @@ OPERATION=
 RERUN_ALL_FAILED=false
 RERUN_FORCE=false
 RERUN_ARG=
+LOGS_URL=false
+LOGS_ALL=false
+LOGS_ARG=
 APP=
 NAMESPACE=
 CONTEXT=
 WATCH=false
-RESULTS_BACKEND=kubearchive
+RESULTS_BACKEND=tekton-results
 while [ "$#" -gt 0 ]; do
   key="$1"
   case $key in 
@@ -107,7 +116,7 @@ while [ "$#" -gt 0 ]; do
       WATCH=true
       shift
       ;;
-    app-status | rerun)
+    app-status | rerun | logs)
       if [ -z "$OPERATION" ]; then
         OPERATION="$1"
       else
@@ -130,6 +139,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     -f | --force)
       RERUN_FORCE=true
+      shift
+      ;;
+    --url)
+      LOGS_URL=true
+      shift
+      ;;
+    --all)
+      LOGS_ALL=true
       shift
       ;;
     -*)
@@ -167,6 +184,8 @@ elif [ "$OPERATION" = "rerun" ]; then
   else
     RERUN_ARG="$CLI_ARG"
   fi
+elif [ "$OPERATION" = "logs" ]; then
+  LOGS_ARG="$CLI_ARG"
 fi
 
 function log () {
@@ -229,7 +248,7 @@ function rerun_component {
 if [ "$RESULTS_BACKEND" = "tekton-results" ]; then
   # CEL filter expressions for tekton results
   is_pipeline="(data_type == 'tekton.dev/v1beta1.PipelineRun' || data_type == 'tekton.dev/v1.PipelineRun')"
-  not_pull="!data.metadata.labels.contains('pipelinesascode.tekton.dev/pull-request')"
+  not_pull="data.metadata.labels['pipelinesascode.tekton.dev/event-type']!='pull_request'"
   is_build="data.metadata.labels['pipelines.appstudio.openshift.io/type']=='build'"
   is_app="data.metadata.labels['appstudio.openshift.io/application']=='$APP'"
 fi
@@ -259,18 +278,39 @@ function get_kubearchive_results {
   local label_selector="$1"
   local limit="${2:-100}"
   local continue_token="$3"
+  local created_after="$4"
   local url="$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/pipelineruns"
   local query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
   if [ -n "$continue_token" ]; then
     query="${query}&continue=$continue_token"
   fi
+  if [ -n "$created_after" ]; then
+    query="${query}&creationTimestampAfter=$created_after"
+  fi
   curl -s -k \
     -H "Authorization: Bearer $(get_token)" \
     "$url?$query"
 }
- 
 
-# 
+function get_kubearchive_taskruns {
+  local label_selector="$1"
+  local limit="${2:-100}"
+  local url="$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/taskruns"
+  local query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
+  curl -s -k \
+    -H "Authorization: Bearer $(get_token)" \
+    "$url?$query"
+}
+
+function get_kubearchive_pipelinerun_by_name {
+  local name="$1"
+  local url="$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/pipelineruns/$name"
+  curl -s -k \
+    -H "Authorization: Bearer $(get_token)" \
+    "$url"
+}
+
+#
 # Processing rerun of a single component
 #
 
@@ -295,9 +335,298 @@ if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "false" ]; then
     fi
   fi
   if [ -n "$RERUN_COMPONENT" ]; then
-    log "triggering new pipeline run for $RERUN_COMPONENT..." 
+    log "triggering new pipeline run for $RERUN_COMPONENT..."
     rerun_component "$RERUN_COMPONENT"
-  fi 
+  fi
+  exit 0
+fi
+
+
+#
+# Processing logs subcommand
+#
+
+if [ "$OPERATION" = "logs" ]; then
+  if [ -z "$LOGS_ARG" ]; then
+    echo "Error: please specify a component or pipelinerun name"
+    help
+    exit 1
+  fi
+
+  LOGS_PR_NAME=""
+  LOGS_PR_JSON=""
+
+  # Step 1: Resolve argument to a pipelinerun
+  log "checking if $LOGS_ARG is a component name..."
+  matching_components=$($KUBECTL_CMD get component.appstudio.redhat.com --field-selector metadata.name="$LOGS_ARG" -o json | jq '.items | length')
+
+  if [ "$matching_components" -eq 1 ]; then
+    log "$LOGS_ARG is a component name, finding latest pipelinerun..."
+    component_app=$($KUBECTL_CMD get component.appstudio.redhat.com "$LOGS_ARG" -o jsonpath='{.spec.application}')
+
+    # Try on-cluster first
+    cluster_labels="appstudio.openshift.io/application=${component_app},appstudio.openshift.io/component=${LOGS_ARG},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type!=pull_request"
+    LOGS_PR_NAME=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
+
+    if [ -z "$LOGS_PR_NAME" ]; then
+      log "no on-cluster pipelinerun found, querying backend..."
+      if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
+        label_selector="appstudio.openshift.io/application=${component_app},appstudio.openshift.io/component=${LOGS_ARG},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request)"
+        local ka_since
+        ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
+        LOGS_PR_JSON=$(get_kubearchive_results "$label_selector" 100 "" "$ka_since" | jq '[.items[] | select(.metadata.creationTimestamp != null)] | sort_by(.metadata.creationTimestamp) | last // empty')
+        LOGS_PR_NAME=$(echo "$LOGS_PR_JSON" | jq -r '.metadata.name // empty')
+      elif [ "$RESULTS_BACKEND" = "tekton-results" ]; then
+        is_component="data.metadata.labels['appstudio.openshift.io/component']=='$LOGS_ARG'"
+        results_json=$(get_results 5 "$is_pipeline && $not_pull && $is_build && $is_component")
+        LOGS_PR_NAME=$(echo "$results_json" | jq -r '.[0].metadata.name // empty')
+        LOGS_PR_JSON=$(echo "$results_json" | jq '.[0] // empty')
+      fi
+    fi
+  else
+    log "$LOGS_ARG is not a component name, treating as pipelinerun name..."
+    LOGS_PR_NAME="$LOGS_ARG"
+  fi
+
+  if [ -z "$LOGS_PR_NAME" ]; then
+    echo "Error: could not find a pipelinerun for $LOGS_ARG"
+    exit 1
+  fi
+
+  log "resolved pipelinerun: $LOGS_PR_NAME"
+
+  # Step 2: Handle --url flag (early exit)
+  if [ "$LOGS_URL" = "true" ]; then
+    log_url=$($KUBECTL_CMD get pipelinerun "$LOGS_PR_NAME" -o jsonpath='{.metadata.annotations.pipelinesascode\.tekton\.dev/log-url}' --ignore-not-found 2>/dev/null)
+    if [ -z "$log_url" ] && [ -n "$LOGS_PR_JSON" ]; then
+      log_url=$(echo "$LOGS_PR_JSON" | jq -r '.metadata.annotations["pipelinesascode.tekton.dev/log-url"] // empty')
+    fi
+    if [ -z "$log_url" ]; then
+      log "fetching log URL from backend..."
+      if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
+        log_url=$(get_kubearchive_pipelinerun_by_name "$LOGS_PR_NAME" | jq -r '.metadata.annotations["pipelinesascode.tekton.dev/log-url"] // empty')
+      elif [ "$RESULTS_BACKEND" = "tekton-results" ]; then
+        pr_json=$(get_results 5 "$is_pipeline && data.metadata.name=='$LOGS_PR_NAME'")
+        log_url=$(echo "$pr_json" | jq -r '.[0].metadata.annotations["pipelinesascode.tekton.dev/log-url"] // empty')
+      fi
+    fi
+    if [ -n "$log_url" ]; then
+      echo "$log_url"
+    else
+      echo "Error: could not find log URL for pipelinerun $LOGS_PR_NAME"
+      exit 1
+    fi
+    exit 0
+  fi
+
+  # Step 3: Try on-cluster log retrieval
+  log "checking if pipelinerun $LOGS_PR_NAME exists on-cluster..."
+  pr_on_cluster=$($KUBECTL_CMD get pipelinerun "$LOGS_PR_NAME" -o json --ignore-not-found 2>/dev/null)
+
+  if [ -n "$pr_on_cluster" ] && echo "$pr_on_cluster" | jq -e '.metadata.name' > /dev/null 2>&1; then
+    log "pipelinerun found on-cluster, fetching logs from pods..."
+
+    taskrun_names=$(echo "$pr_on_cluster" | jq -r '.status.childReferences[]? | select(.kind=="TaskRun") | .name' 2>/dev/null)
+    if [ -z "$taskrun_names" ]; then
+      taskrun_names=$($KUBECTL_CMD get taskrun -l "tekton.dev/pipelineRun=$LOGS_PR_NAME" --no-headers --ignore-not-found | awk '{print $1}')
+    fi
+
+    if [ -z "$taskrun_names" ]; then
+      echo "Error: no taskruns found for pipelinerun $LOGS_PR_NAME"
+      exit 1
+    fi
+
+    printed_logs=false
+    for taskrun_name in $taskrun_names; do
+      taskrun_json=$($KUBECTL_CMD get taskrun "$taskrun_name" -o json --ignore-not-found 2>/dev/null)
+
+      # Filter to failed tasks unless --all is set
+      if [ "$LOGS_ALL" = "false" ]; then
+        is_failed=$(echo "$taskrun_json" | jq -r '(.status.conditions[0].status == "False") // false')
+        if [ "$is_failed" != "true" ]; then
+          continue
+        fi
+      fi
+
+      task_display_name=$(echo "$pr_on_cluster" | jq -r --arg T "$taskrun_name" '.status.childReferences[]? | select(.name==$T) | .pipelineTaskName // empty')
+      if [ -z "$task_display_name" ]; then
+        task_display_name="$taskrun_name"
+      fi
+
+      pod_name=$(echo "$taskrun_json" | jq -r '.status.podName // empty')
+      if [ -n "$pod_name" ]; then
+        echo ""
+        echo "=== Task: $task_display_name ($taskrun_name) ==="
+        task_params=$(echo "$taskrun_json" | jq -r '.spec.params[]? | "  \(.name) = \(.value)"')
+        if [ -n "$task_params" ]; then
+          echo "$task_params"
+        fi
+
+        if [ "$LOGS_ALL" = "true" ]; then
+          # Show all containers
+          echo ""
+          $KUBECTL_CMD logs "$pod_name" --all-containers --ignore-errors 2>/dev/null || log "warning: could not get logs for pod $pod_name"
+        else
+          # Show only the first failed step's container
+          failed_step=$(echo "$taskrun_json" | jq -r '[.status.steps[]? | select(.terminated.exitCode != 0 or .terminated.reason == "Error")] | .[0].name // empty')
+          if [ -n "$failed_step" ]; then
+            echo ""
+            echo "--- Step: $failed_step ---"
+            echo ""
+            $KUBECTL_CMD logs "$pod_name" -c "step-$failed_step" 2>/dev/null || log "warning: could not get logs for container step-$failed_step"
+          else
+            echo ""
+            $KUBECTL_CMD logs "$pod_name" --all-containers --ignore-errors 2>/dev/null || log "warning: could not get logs for pod $pod_name"
+          fi
+        fi
+        printed_logs=true
+      else
+        log "warning: no pod found for taskrun $taskrun_name"
+      fi
+    done
+
+    if [ "$printed_logs" = "false" ] && [ "$LOGS_ALL" = "false" ]; then
+      echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+    fi
+    exit 0
+  fi
+
+  # Step 4: Fall back to backend for logs
+  log "pipelinerun not found on-cluster, querying backend for logs..."
+
+  if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
+    taskruns_json=$(get_kubearchive_taskruns "tekton.dev/pipelineRun=$LOGS_PR_NAME")
+    taskrun_count=$(echo "$taskruns_json" | jq '.items | length')
+
+    if [ "$taskrun_count" -eq 0 ] 2>/dev/null; then
+      echo "Error: no taskruns found in kubearchive for pipelinerun $LOGS_PR_NAME"
+      echo "Hint: use --url to get the log URL for viewing in a browser"
+      exit 1
+    fi
+
+    printed_logs=false
+    for taskrun in $(echo "$taskruns_json" | jq -r '.items[].metadata.name'); do
+      taskrun_item=$(echo "$taskruns_json" | jq --arg T "$taskrun" '.items[] | select(.metadata.name==$T)')
+
+      if [ "$LOGS_ALL" = "false" ]; then
+        is_failed=$(echo "$taskrun_item" | jq -r '(.status.conditions[0].status == "False") // false')
+        if [ "$is_failed" != "true" ]; then
+          continue
+        fi
+      fi
+
+      task_display_name=$(echo "$taskrun_item" | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // .metadata.name')
+      echo ""
+      echo "=== Task: $task_display_name ($taskrun) ==="
+      task_params=$(echo "$taskrun_item" | jq -r '.spec.params[]? | "  \(.name) = \(.value)"')
+      if [ -n "$task_params" ]; then
+        echo "$task_params"
+      fi
+
+      # Determine which steps to show logs for
+      if [ "$LOGS_ALL" = "true" ]; then
+        step_names=$(echo "$taskrun_item" | jq -r '.status.steps[]?.name')
+      else
+        # Find only the first failed step (cascading failures are noise)
+        step_names=$(echo "$taskrun_item" | jq -r '[.status.steps[]? | select(.terminated.exitCode != 0 or .terminated.reason == "Error")] | .[0].name // empty')
+      fi
+
+      if [ -z "$step_names" ]; then
+        step_names=$(echo "$taskrun_item" | jq -r '.status.steps[]?.name')
+      fi
+
+      for step_name in $step_names; do
+        echo ""
+        echo "--- Step: $step_name ---"
+        echo ""
+        step_log=$(curl -s -k \
+          -H "Authorization: Bearer $(get_token)" \
+          "$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/taskruns/$taskrun/log?container=step-$step_name" 2>/dev/null)
+        if [ -n "$step_log" ] && ! echo "$step_log" | jq -e '.message' > /dev/null 2>&1; then
+          echo "$step_log"
+        else
+          step_status=$(echo "$taskrun_item" | jq -r --arg S "$step_name" '.status.steps[]? | select(.name==$S) | .terminated.reason // .running // "Unknown"')
+          echo "  Status: $step_status"
+          echo "  (Logs not available from kubearchive. Use --url to view in browser.)"
+        fi
+      done
+      printed_logs=true
+    done
+
+    if [ "$printed_logs" = "false" ] && [ "$LOGS_ALL" = "false" ]; then
+      echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+    fi
+
+  elif [ "$RESULTS_BACKEND" = "tekton-results" ]; then
+    # Query raw records (not decoded) so we can extract result UIDs from record names
+    is_taskrun="(data_type == 'tekton.dev/v1beta1.TaskRun' || data_type == 'tekton.dev/v1.TaskRun')"
+    is_for_pr="data.metadata.labels['tekton.dev/pipelineRun']=='$LOGS_PR_NAME'"
+    raw_records=$(curl -s -k --get \
+      -H "Authorization: Bearer $(get_token)" \
+      -H "Accept: application/json" \
+      --data-urlencode "filter=$is_taskrun && $is_for_pr" \
+      --data-urlencode "page_size=50" \
+      --data-urlencode "order_by=create_time desc" \
+      "$API/parents/$NAMESPACE/results/-/records" 2>/dev/null)
+
+    taskrun_count=$(echo "$raw_records" | jq '.records | length' 2>/dev/null)
+
+    if [ -z "$taskrun_count" ] || [ "$taskrun_count" -eq 0 ] 2>/dev/null; then
+      echo "Error: no taskruns found in tekton-results for pipelinerun $LOGS_PR_NAME"
+      echo "Hint: use --url to get the log URL for viewing in a browser"
+      exit 1
+    fi
+
+    printed_logs=false
+    for i in $(seq 0 $(($taskrun_count - 1))); do
+      record_name=$(echo "$raw_records" | jq -r ".records[$i].name")
+      taskrun_item=$(echo "$raw_records" | jq -r ".records[$i].data.value" | base64 -d 2>/dev/null | jq -r)
+
+      if [ "$LOGS_ALL" = "false" ]; then
+        is_failed=$(echo "$taskrun_item" | jq -r '(.status.conditions[0].status == "False") // false')
+        if [ "$is_failed" != "true" ]; then
+          continue
+        fi
+      fi
+
+      taskrun_name=$(echo "$taskrun_item" | jq -r '.metadata.name')
+      task_display_name=$(echo "$taskrun_item" | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // .metadata.name')
+      echo ""
+      echo "=== Task: $task_display_name ($taskrun_name) ==="
+      task_params=$(echo "$taskrun_item" | jq -r '.spec.params[]? | "  \(.name) = \(.value)"')
+      if [ -n "$task_params" ]; then
+        echo "$task_params"
+      fi
+
+      # Extract result UID and record UID from record name: {ns}/results/{result_uid}/records/{record_uid}
+      result_uid=$(echo "$record_name" | sed -E 's|.*/results/([^/]+)/records/.*|\1|')
+      record_uid=$(echo "$record_name" | sed -E 's|.*/records/([^/]+)$|\1|')
+      log "result UID: $result_uid, record UID: $record_uid"
+
+      # Fetch log content directly using the TaskRun's record UID
+      log_content=$(curl -s -k \
+        -H "Authorization: Bearer $(get_token)" \
+        "$API/parents/$NAMESPACE/results/$result_uid/logs/$record_uid" 2>/dev/null)
+
+      if [ -n "$log_content" ] && ! echo "$log_content" | jq -e '.code' > /dev/null 2>&1; then
+        echo ""
+        echo "$log_content"
+      else
+        echo ""
+        step_statuses=$(echo "$taskrun_item" | jq -r '.status.steps[]? | "  Step: \(.name) - \(.terminated.reason // "Unknown")"')
+        if [ -n "$step_statuses" ]; then
+          echo "$step_statuses"
+        fi
+        echo "  (Log content not available. Use --url to view in browser.)"
+      fi
+      printed_logs=true
+    done
+
+    if [ "$printed_logs" = "false" ] && [ "$LOGS_ALL" = "false" ]; then
+      echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+    fi
+  fi
+
   exit 0
 fi
 
@@ -316,14 +645,17 @@ log "getting pipelines for $APP..."
 
 components_json='[]'
 
+# There is sometimes a discrepancy between kubearchive and tekton-results;
+# tekton-results is preferred as the potentially more stable backend.
 if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
   start_time=$(date '+%s')
   ka_tmp_dir=$(mktemp -d)
 
   for component in $components; do
     (
-      label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request,appstudio.openshift.io/component=${component}"
-      get_kubearchive_results "$label_selector" 1 | jq '.items[0] // empty' > "${ka_tmp_dir}/${component}.json"
+      label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request),appstudio.openshift.io/component=${component}"
+      ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
+      get_kubearchive_results "$label_selector" 100 "" "$ka_since" | jq '[.items[] | select(.metadata.creationTimestamp != null)] | sort_by(.metadata.creationTimestamp) | last // empty' > "${ka_tmp_dir}/${component}.json"
     ) &
   done
   wait
@@ -370,20 +702,6 @@ else
       # the first matching pipeline should be the most recent because of the order_by param in the api call
       component_pipeline=$(echo $pipelines | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first' )
       if [ "$component_pipeline" != null ]; then
-
-        # retrieves the most recent pipeline from the cluster
-        cluster_labels="appstudio.openshift.io/application=${APP},appstudio.openshift.io/component=${component},pipelinesascode.tekton.dev/event-type!=pull_request,pipelines.appstudio.openshift.io/type=build,!pipelinesascode.tekton.dev/pull-request"
-        cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
-
-        # compares the cluster pipeline with the results pipeline and determines which one is newer
-        if [ -n "$cluster_component_pipeline_name" ]; then
-          component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
-          cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
-          # greater than or equal because we prefer the cluster one over the results API one
-          if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
-            component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
-          fi
-        fi
         remaining_components=$( echo "$remaining_components" | sed "/^$component$/d" )
         components_json=$(echo "$components_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
       fi
@@ -401,6 +719,26 @@ else
 
   log "total duration: $total_duration seconds"
 fi
+
+# Compare each component's backend result with on-cluster pipelineruns and use the newer one
+updated_json='[]'
+for component in $components; do
+  component_pipeline=$(echo "$components_json" | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first // empty')
+  if [ -z "$component_pipeline" ] || [ "$component_pipeline" = "null" ]; then
+    continue
+  fi
+  cluster_labels="appstudio.openshift.io/application=${APP},appstudio.openshift.io/component=${component},pipelinesascode.tekton.dev/event-type!=pull_request,pipelines.appstudio.openshift.io/type=build"
+  cluster_component_pipeline_name=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" --sort-by .metadata.creationTimestamp --ignore-not-found --no-headers | tail -n 1 | awk '{print $1}')
+  if [ -n "$cluster_component_pipeline_name" ]; then
+    component_pipeline_timestamp=$(echo "$component_pipeline" | jq -r '.metadata.creationTimestamp')
+    cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
+    if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
+      component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
+    fi
+  fi
+  updated_json=$(echo "$updated_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
+done
+components_json="$updated_json"
 
 #
 # processing output for rerun subcommand, all-failed option

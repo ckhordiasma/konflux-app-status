@@ -43,8 +43,8 @@ EXAMPLES
   konflux-cli.sh logs --url odh-dashboard-v2-17
   konflux-cli.sh logs --all odh-dashboard-v2-17
 DEPENDENCIES
-  kubectl, kubelogin
-  kubectl context must be configured for kubelogin OIDC and tekton results
+  kubectl, jq, curl
+  kubectl context must be configured with access to a Konflux cluster
 EOF
 }
 
@@ -199,7 +199,17 @@ function log () {
 
 if ! command -v kubectl > /dev/null 2>&1; then
   echo "kubectl does not appear to be installed or in your PATH."
-  exit 1 
+  exit 1
+fi
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "jq does not appear to be installed or in your PATH."
+  exit 1
+fi
+
+if ! command -v curl > /dev/null 2>&1; then
+  echo "curl does not appear to be installed or in your PATH."
+  exit 1
 fi
 
 # 

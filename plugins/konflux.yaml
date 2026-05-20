@@ -1,0 +1,33 @@
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: konflux
+spec:
+  version: KREW_TAG
+  homepage: https://github.com/ckhordiasma/konflux-app-status
+  shortDescription: CLI for Konflux pipeline status, logs, and reruns
+  description: |
+    A CLI alternative to the Konflux web interface for managing Tekton
+    pipeline runs. Supports viewing application component status,
+    streaming build logs, and retriggering failed pipelines.
+
+    Subcommands:
+      app-status  Show latest pipeline status for all components of an app
+      logs        Stream or fetch build logs for a component or pipelinerun
+      rerun       Retrigger a component build or all failed components
+  caveats: |
+    This plugin requires jq (https://jqlang.github.io/jq/) and curl to be installed.
+
+    Your kubectl context must be configured for a Konflux cluster.
+  platforms:
+  - selector:
+      matchExpressions:
+      - key: os
+        operator: In
+        values: [darwin, linux]
+    uri: https://github.com/ckhordiasma/konflux-app-status/releases/download/KREW_TAG/konflux-KREW_TAG.tar.gz
+    sha256: KREW_SHA256
+    files:
+    - from: kubectl-konflux
+      to: .
+    bin: kubectl-konflux

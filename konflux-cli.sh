@@ -81,7 +81,7 @@ while [ "$#" -gt 0 ]; do
       HYPERLINKS=false
       shift
       ;;
-    -v)
+    -v | --verbose)
       VERBOSE=true
       shift
       ;;
@@ -188,9 +188,11 @@ elif [ "$OPERATION" = "logs" ]; then
   LOGS_ARG="$CLI_ARG"
 fi
 
+SCRIPT_START=$(date '+%s')
 function log () {
     if [[ "$VERBOSE" = "true" ]]; then
-        echo "$@"
+        local elapsed=$(( $(date '+%s') - SCRIPT_START ))
+        echo "[+${elapsed}s] $@"
     fi
 }
 
@@ -634,20 +636,20 @@ fi
 #
 # Getting most recent pipelineruns for all components of a given app
 #
-log "Getting components list for $APP..."
+log "fetching component list for $APP..."
+step_start=$(date '+%s')
 components=$($KUBECTL_CMD get component.appstudio.redhat.com -o jsonpath="{range .items[?(@.spec.application=='$APP')]}{.metadata.name}{'\n'}{end}")
 # adding filter to ignore nudge components
 # components=$(echo "$components" | sed '/^nudge-only/d')
-
-log "Found components $components"
-
-log "getting pipelines for $APP..."
+num_components=$(echo "$components" | wc -w | tr -d ' ')
+log "found $num_components components ($(( $(date '+%s') - step_start ))s)"
 
 components_json='[]'
 
 # There is sometimes a discrepancy between kubearchive and tekton-results;
 # tekton-results is preferred as the potentially more stable backend.
 if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
+  log "querying kubearchive for $num_components components (parallel)..."
   start_time=$(date '+%s')
   ka_tmp_dir=$(mktemp -d)
 
@@ -677,7 +679,8 @@ if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
 
   end_time=$(date '+%s')
   duration=$(($end_time - $start_time))
-  log "kubearchive query duration: $duration seconds"
+  matched_count=$(echo "$components_json" | jq 'length')
+  log "kubearchive query complete: $matched_count/$num_components components in ${duration}s"
 
 else
   app_params="$is_pipeline && $not_pull && $is_app && $is_build"
@@ -688,7 +691,10 @@ else
 
   remaining_components="$components"
   component_params="$app_params"
+  total_components=$num_components
+  iteration=0
   total_duration=0
+  log "querying tekton-results for $total_components components..."
   while [ -n "$remaining_components" ]; do
     start_time=$(date '+%s')
     pipelines=$(get_results 15 "$component_params" )
@@ -713,14 +719,20 @@ else
 
     end_time=$(date '+%s')
     duration=$(($end_time - $start_time))
-    log "iteration duration: $duration seconds"
+    iteration=$(( iteration + 1 ))
+    matched_so_far=$(echo "$components_json" | jq 'length')
+    remaining_count=$(echo "$remaining_components" | wc -w | tr -d ' ')
+    log "  iteration $iteration: matched $matched_so_far/$total_components components (${duration}s)"
     total_duration=$(( $total_duration + $duration ))
   done
 
-  log "total duration: $total_duration seconds"
+  log "backend query complete: $(echo "$components_json" | jq 'length')/$total_components components in ${total_duration}s"
 fi
 
 # Compare each component's backend result with on-cluster pipelineruns and use the newer one
+log "comparing with on-cluster pipelineruns..."
+step_start=$(date '+%s')
+cluster_newer_count=0
 updated_json='[]'
 for component in $components; do
   component_pipeline=$(echo "$components_json" | jq --arg X "$component" 'map(select(.metadata.labels["appstudio.openshift.io/component"]==$X)) | first // empty')
@@ -734,11 +746,14 @@ for component in $components; do
     cluster_component_pipeline_timestamp=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o jsonpath='{.metadata.creationTimestamp}')
     if [[ "$cluster_component_pipeline_timestamp" > "$component_pipeline_timestamp" || "$cluster_component_pipeline_timestamp" == "$component_pipeline_timestamp" ]]; then
       component_pipeline=$($KUBECTL_CMD get pipelinerun "$cluster_component_pipeline_name" -o json)
+      cluster_newer_count=$(( cluster_newer_count + 1 ))
+      log "  $component: using on-cluster run (newer)"
     fi
   fi
   updated_json=$(echo "$updated_json" | jq -r --argjson Y "$component_pipeline" '. + [$Y]')
 done
 components_json="$updated_json"
+log "on-cluster comparison complete: $cluster_newer_count/$num_components had newer on-cluster runs ($(( $(date '+%s') - step_start ))s)"
 
 #
 # processing output for rerun subcommand, all-failed option
@@ -767,12 +782,11 @@ fi
 # Processing output for app-status subcommand
 #
 if [ "$OPERATION" = "app-status" ]; then
+  log "app-status complete: $num_components components in $(( $(date '+%s') - SCRIPT_START ))s"
   if [ $OUTPUT_TYPE = "json" ]; then
     echo "$components_json" | jq -r -M
     exit 0
   fi
-
-  log "formatting output..."
   # using semicolon as the delimiter for column command, and comma as delimiter for awk (for adding terminal hyperlinks)
   FINAL_OUTPUT=$(echo "$components_json" | jq -r '.[]| .metadata.annotations["pipelinesascode.tekton.dev/log-url"] + ";," + .metadata.name + ";," + .status.conditions[0].reason' | sed '1s/^/PIPELINE RUN URL;,PIPELINE RUN;,STATUS\n/' |column -t -s ";")
 

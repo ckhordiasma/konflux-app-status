@@ -1,19 +1,33 @@
 # Konflux CLI tool
 
-This tool serves as a CLI alternative to tasks that are normally done through the konflux web interface. It currently has two main features:
+A kubectl plugin for managing Konflux/Tekton pipelines. View application component status, stream build logs, and retrigger failed pipelines — all from the command line.
 
-- Get the most recent pipeline status for all components of a given application
-- Rerun a given component pipeline (or all failed components of a given application)
+## Installation
+
+### Via krew (recommended)
+
+```bash
+kubectl krew index add konflux https://github.com/ckhordiasma/konflux-app-status.git
+kubectl krew install konflux/konflux
+```
+
+After installation, use `kubectl konflux` instead of `./konflux-cli.sh`.
+
+### Manual
+
+Clone this repo and run `./konflux-cli.sh` directly, or copy `kubectl-konflux` to a directory in your `$PATH`.
 
 ## Prerequisites
 
-needs kubectl and jq
+- kubectl
+- [jq](https://jqlang.github.io/jq/)
+- [kubelogin](https://github.com/int128/kubelogin) (for OIDC authentication)
 
-kubectl needs to be configured with access to a cluster using `oc login`
+kubectl needs to be configured with access to a cluster using `oc login`.
 
 ## Usage
 
-In addition to the info here, you can use `bash konflux-cli.sh -h` for a detailed helpfile.
+Run `kubectl konflux -h` (or `./konflux-cli.sh -h`) for the full help text.
 
 ### App Status
 

@@ -199,7 +199,12 @@ function log () {
 
 if ! command -v kubectl > /dev/null 2>&1; then
   echo "kubectl does not appear to be installed or in your PATH."
-  exit 1 
+  exit 1
+fi
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "jq does not appear to be installed or in your PATH."
+  exit 1
 fi
 
 # 

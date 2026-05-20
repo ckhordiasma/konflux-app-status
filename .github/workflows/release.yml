@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build tarball
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          tar czf "konflux-${TAG}.tar.gz" kubectl-konflux
+          sha256sum "konflux-${TAG}.tar.gz" | awk '{print $1}' > sha256.txt
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "SHA256=$(cat sha256.txt)" >> "$GITHUB_ENV"
+
+      - name: Update krew manifest
+        run: |
+          sed -i "s/KREW_TAG/${TAG}/g" plugins/konflux.yaml
+          sed -i "s/KREW_SHA256/${SHA256}/g" plugins/konflux.yaml
+
+      - name: Commit updated manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          git add plugins/konflux.yaml
+          git diff --cached --quiet || git commit -m "Update krew manifest for ${TAG}"
+          git push origin main
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: konflux-${{ env.TAG }}.tar.gz
+          generate_release_notes: true

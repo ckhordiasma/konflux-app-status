@@ -8,7 +8,7 @@ set -e
 
 help() {
 cat << EOF
-usage: ./konflux-cli.sh [-v] SUBCOMMAND
+usage: kubectl konflux [-v] SUBCOMMAND
 SUBCOMMANDS
   app-status [-h] [-o json|table] APP
     APP - the name of the application in konflux
@@ -32,16 +32,16 @@ GLOBAL FLAGS
   -n, --namespace - specify kubernetes namespace
   --results - set results backend: tekton-results (default) or kubearchive
 EXAMPLES
-  konflux-cli.sh app-status rhoai-v2-16
-  konflux-cli.sh app-status -o json rhoai-v2-16
-  konflux-cli.sh app-status -l rhoai-v2-16  
-  konflux-cli.sh rerun odh-dashboard-v2-17
-  konflux-cli.sh rerun odh-dashboard-v2-17-on-push-ndnj9
-  konflux-cli.sh rerun --all-failed-components rhoai-v2-17
-  konflux-cli.sh logs odh-dashboard-v2-17
-  konflux-cli.sh logs odh-dashboard-v2-17-on-push-ndnj9
-  konflux-cli.sh logs --url odh-dashboard-v2-17
-  konflux-cli.sh logs --all odh-dashboard-v2-17
+  kubectl konflux app-status rhoai-v2-16
+  kubectl konflux app-status -o json rhoai-v2-16
+  kubectl konflux app-status --all rhoai-v2-16
+  kubectl konflux rerun odh-dashboard-v2-17
+  kubectl konflux rerun odh-dashboard-v2-17-on-push-ndnj9
+  kubectl konflux rerun --all-failed-components rhoai-v2-17
+  kubectl konflux logs odh-dashboard-v2-17
+  kubectl konflux logs odh-dashboard-v2-17-on-push-ndnj9
+  kubectl konflux logs --url odh-dashboard-v2-17
+  kubectl konflux logs --all odh-dashboard-v2-17
 DEPENDENCIES
   kubectl, jq, curl
   kubectl context must be configured with access to a Konflux cluster

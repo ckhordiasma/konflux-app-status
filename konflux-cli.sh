@@ -29,7 +29,7 @@ GLOBAL FLAGS
   -v, --verbose - show more logs in output
   -c, --context - specify kubectl context name
   -n, --namespace - specify kubernetes namespace
-  --results - set results backend: kubearchive (default) or tekton-results
+  --results - set results backend: tekton-results (default) or kubearchive
 EXAMPLES
   konflux-cli.sh app-status rhoai-v2-16
   konflux-cli.sh app-status -o json rhoai-v2-16

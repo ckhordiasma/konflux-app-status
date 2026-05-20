@@ -18,26 +18,25 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           tar czf "konflux-${TAG}.tar.gz" kubectl-konflux
-          sha256sum "konflux-${TAG}.tar.gz" | awk '{print $1}' > sha256.txt
+          SHA256=$(sha256sum "konflux-${TAG}.tar.gz" | awk '{print $1}')
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
-          echo "SHA256=$(cat sha256.txt)" >> "$GITHUB_ENV"
-
-      - name: Update krew manifest
-        run: |
-          sed -i "s/KREW_TAG/${TAG}/g" plugins/konflux.yaml
-          sed -i "s/KREW_SHA256/${SHA256}/g" plugins/konflux.yaml
-
-      - name: Commit updated manifest
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout main
-          git add plugins/konflux.yaml
-          git diff --cached --quiet || git commit -m "Update krew manifest for ${TAG}"
-          git push origin main
+          echo "SHA256=${SHA256}" >> "$GITHUB_ENV"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: konflux-${{ env.TAG }}.tar.gz
           generate_release_notes: true
+
+      - name: Update krew manifest on main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          sed -i "s|  version: .*|  version: ${TAG}|" plugins/konflux.yaml
+          sed -i "s|    uri: .*/konflux-.*\.tar\.gz|    uri: https://github.com/ckhordiasma/konflux-app-status/releases/download/${TAG}/konflux-${TAG}.tar.gz|" plugins/konflux.yaml
+          sed -i "s|    sha256: .*|    sha256: ${SHA256}|" plugins/konflux.yaml
+          git add plugins/konflux.yaml
+          git diff --cached --quiet || git commit -m "Update krew manifest for ${TAG}"
+          git push origin main

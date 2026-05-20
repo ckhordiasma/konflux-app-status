@@ -3,7 +3,7 @@ kind: Plugin
 metadata:
   name: konflux
 spec:
-  version: KREW_TAG
+  version: v0.1.0
   homepage: https://github.com/ckhordiasma/konflux-app-status
   shortDescription: CLI for Konflux pipeline status, logs, and reruns
   description: |
@@ -25,8 +25,8 @@ spec:
       - key: os
         operator: In
         values: [darwin, linux]
-    uri: https://github.com/ckhordiasma/konflux-app-status/releases/download/KREW_TAG/konflux-KREW_TAG.tar.gz
-    sha256: KREW_SHA256
+    uri: https://github.com/ckhordiasma/konflux-app-status/releases/download/v0.1.0/konflux-v0.1.0.tar.gz
+    sha256: f2984fd1ae6d48130c66a9d2c26f2e2012a6e867190c7e1db677f57ffc95dc95
     files:
     - from: kubectl-konflux
       to: .

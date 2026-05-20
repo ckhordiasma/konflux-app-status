@@ -7,8 +7,8 @@ A kubectl plugin for managing Konflux/Tekton pipelines. View application compone
 ### Via krew (recommended)
 
 ```bash
-kubectl krew index add konflux https://github.com/ckhordiasma/konflux-app-status.git
-kubectl krew install konflux/konflux
+kubectl krew index add ckhordiasma https://github.com/ckhordiasma/konflux-app-status.git
+kubectl krew install ckhordiasma/konflux
 ```
 
 After installation, use `kubectl konflux` instead of `./konflux-cli.sh`.

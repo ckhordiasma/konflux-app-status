@@ -11,11 +11,11 @@ kubectl krew index add ckhordiasma https://github.com/ckhordiasma/konflux-app-st
 kubectl krew install ckhordiasma/konflux
 ```
 
-After installation, use `kubectl konflux` instead of `./konflux-cli.sh`.
+After installation, use `kubectl konflux` to run the tool.
 
 ### Manual
 
-Clone this repo and run `./konflux-cli.sh` directly, or copy `kubectl-konflux` to a directory in your `$PATH`.
+Clone this repo and copy `kubectl-konflux` to a directory in your `$PATH`, or run `./kubectl-konflux` directly.
 
 ## Prerequisites
 
@@ -27,33 +27,61 @@ kubectl needs to be configured with access to a cluster using `oc login`.
 
 ## Usage
 
-Run `kubectl konflux -h` (or `./konflux-cli.sh -h`) for the full help text.
+Run `kubectl konflux -h` for the full help text.
 
 ### App Status
 
 ```
-./konflux-cli.sh app-status APP
+kubectl konflux app-status APP
 ```
 
 Given an APP, finds and displays the status of each component's latest pipeline run. The default output produces a table with two columns: pipelinerun names and their statuses.
 
-The `--hyperlinks` flag can be used to make the pipelinerun names as clickable hyperlinks, which you can use to get the logs and more info from the web interface. The hyperlinks work on most terminals, but notably does not work on the stock iOS terminal.
+By default, only failing and running components are shown. Use `--all` to show all components including successful ones.
 
-`--output json` will skip the table and instead output a JSON list of each component's most recent pipelinerun spec. 
+Pipelinerun names are displayed as clickable terminal hyperlinks (works on most terminals, but not the stock macOS terminal). Use `-H` / `--no-hyperlinks` to disable this.
 
-### Rerunning
+`-o json` will skip the table and instead output the full JSON spec of each component's most recent pipelinerun.
 
-```
-./konflux-cli.sh rerun NAME
-```
+`-w` / `--watch` will continuously refresh the output.
 
-Reruns a component based on NAME. If NAME is a component name, the component will be rebuilt. 
-
-If NAME is a pipeline run, the tool will determine what component the pipelinerun based from, and then rerun that component.
-
-Alternatively, instead of NAME you can specify the following to run ALL failed components of a given APP:
+### Logs
 
 ```
-bash konflux-cli.sh rerun --all-failed-components APP
+kubectl konflux logs COMPONENT
+kubectl konflux logs PIPELINERUN
 ```
 
+Streams build logs for a component or pipelinerun. If given a component name, the tool finds the latest pipelinerun for that component.
+
+By default, only failed task logs are shown. Use `--all` to see logs for all tasks.
+
+`--url` prints the log URL instead of streaming log text, useful for viewing in the Konflux web UI.
+
+The tool first checks for on-cluster pipelineruns, then falls back to the configured results backend (tekton-results or kubearchive).
+
+### Rerun
+
+```
+kubectl konflux rerun COMPONENT
+kubectl konflux rerun PIPELINERUN
+```
+
+Reruns a component build. If given a component name, the component will be rebuilt. If given a pipelinerun name, the tool determines which component the pipelinerun belongs to and reruns that component.
+
+To rerun all failed components of a given application:
+
+```
+kubectl konflux rerun -a APP
+```
+
+Use `-f` / `--force` with `-a` to retrigger all components, not just failed ones.
+
+### Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `-v`, `--verbose` | Show more detailed logs in output |
+| `-c`, `--context` | Specify kubectl context name |
+| `-n`, `--namespace` | Specify kubernetes namespace |
+| `--results` | Set results backend: `tekton-results` (default) or `kubearchive` |

@@ -649,16 +649,26 @@ components_json='[]'
 # There is sometimes a discrepancy between kubearchive and tekton-results;
 # tekton-results is preferred as the potentially more stable backend.
 if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
-  log "querying kubearchive for $num_components components (parallel)..."
+  ka_batch_size="${KUBEARCHIVE_BATCH_SIZE:-0}"
+  if [ "$ka_batch_size" -gt 0 ] 2>/dev/null; then
+    log "querying kubearchive for $num_components components (parallel, batch size $ka_batch_size)..."
+  else
+    log "querying kubearchive for $num_components components (parallel)..."
+  fi
   start_time=$(date '+%s')
   ka_tmp_dir=$(mktemp -d)
+  ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
 
+  batch_count=0
   for component in $components; do
     (
       label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request),appstudio.openshift.io/component=${component}"
-      ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
-      get_kubearchive_results "$label_selector" 100 "" "$ka_since" | jq '[.items[] | select(.metadata.creationTimestamp != null)] | sort_by(.metadata.creationTimestamp) | last // empty' > "${ka_tmp_dir}/${component}.json"
+      get_kubearchive_results "$label_selector" 1 "" "$ka_since" | jq '.items[0] // empty' > "${ka_tmp_dir}/${component}.json"
     ) &
+    batch_count=$((batch_count + 1))
+    if [ "$ka_batch_size" -gt 0 ] && [ $((batch_count % ka_batch_size)) -eq 0 ]; then
+      wait
+    fi
   done
   wait
 

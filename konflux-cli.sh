@@ -52,7 +52,7 @@ EOF
 # Processing Parameters
 #
 
-ORIGINAL_ARGS=$@
+ORIGINAL_ARGS="$*"
 
 CLI_ARG=
 OUTPUT_TYPE=table
@@ -130,7 +130,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --results)
       RESULTS_BACKEND="$2"
-      if [ "$RESULTS_BACKEND" != "kubearchive" -a "$RESULTS_BACKEND" != "tekton-results" ]; then
+      if [ "$RESULTS_BACKEND" != "kubearchive" ] && [ "$RESULTS_BACKEND" != "tekton-results" ]; then
         echo "invalid results backend: $RESULTS_BACKEND (must be kubearchive or tekton-results)"
         help
         exit 1
@@ -174,7 +174,7 @@ done
 if [ "$OPERATION" = "app-status" ]; then
   APP="$CLI_ARG"
 elif [ "$OPERATION" = "rerun" ]; then
-  if [ "$RERUN_FORCE" = "true" -a "$RERUN_ALL_FAILED" = "false" ]; then
+  if [ "$RERUN_FORCE" = "true" ] && [ "$RERUN_ALL_FAILED" = "false" ]; then
     echo "--force can only be used with -a/--all-failed-components"
     help
     exit 1
@@ -192,11 +192,11 @@ SCRIPT_START=$(date '+%s')
 function log () {
     if [[ "$VERBOSE" = "true" ]]; then
         local elapsed=$(( $(date '+%s') - SCRIPT_START ))
-        echo "[+${elapsed}s] $@"
+        echo "[+${elapsed}s] $*"
     fi
 }
 
-if ! $(which kubectl > /dev/null); then
+if ! command -v kubectl > /dev/null 2>&1; then
   echo "kubectl does not appear to be installed or in your PATH."
   exit 1 
 fi
@@ -221,7 +221,7 @@ elif [ "$RESULTS_BACKEND" = "kubearchive" ]; then
   log "detected kubearchive API endpoint: $API"
 fi
 
-if [ -z "$CONTEXT" -o -z "$API" ]; then
+if [ -z "$CONTEXT" ] || [ -z "$API" ]; then
   echo "Error: was not able to parse API endpoint from kubectl context. Please make sure your kubectl context is configured correctly"
   exit 1
 fi
@@ -282,7 +282,8 @@ function get_kubearchive_results {
   local continue_token="$3"
   local created_after="$4"
   local url="$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/pipelineruns"
-  local query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
+  local query
+  query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
   if [ -n "$continue_token" ]; then
     query="${query}&continue=$continue_token"
   fi
@@ -298,7 +299,8 @@ function get_kubearchive_taskruns {
   local label_selector="$1"
   local limit="${2:-100}"
   local url="$API/apis/tekton.dev/v1/namespaces/$NAMESPACE/taskruns"
-  local query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
+  local query
+  query="labelSelector=$(printf '%s' "$label_selector" | jq -sRr @uri)&limit=$limit"
   curl -s -k \
     -H "Authorization: Bearer $(get_token)" \
     "$url?$query"
@@ -316,7 +318,7 @@ function get_kubearchive_pipelinerun_by_name {
 # Processing rerun of a single component
 #
 
-if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "false" ]; then
+if [ "$OPERATION" = "rerun" ] && [ "$RERUN_ALL_FAILED" = "false" ]; then
   log "detecting if the rerun argument is a component name"
   matching_components=$($KUBECTL_CMD get component.appstudio.redhat.com --field-selector metadata.name="$RERUN_ARG" -o json | jq '.items | length')
   if [ "$matching_components" -eq 1 ]; then 
@@ -374,7 +376,6 @@ if [ "$OPERATION" = "logs" ]; then
       log "no on-cluster pipelinerun found, querying backend..."
       if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
         label_selector="appstudio.openshift.io/application=${component_app},appstudio.openshift.io/component=${LOGS_ARG},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request)"
-        local ka_since
         ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
         LOGS_PR_JSON=$(get_kubearchive_results "$label_selector" 100 "" "$ka_since" | jq '[.items[] | select(.metadata.creationTimestamp != null)] | sort_by(.metadata.creationTimestamp) | last // empty')
         LOGS_PR_NAME=$(echo "$LOGS_PR_JSON" | jq -r '.metadata.name // empty')
@@ -580,7 +581,7 @@ if [ "$OPERATION" = "logs" ]; then
     fi
 
     printed_logs=false
-    for i in $(seq 0 $(($taskrun_count - 1))); do
+    for i in $(seq 0 $((taskrun_count - 1))); do
       record_name=$(echo "$raw_records" | jq -r ".records[$i].name")
       taskrun_item=$(echo "$raw_records" | jq -r ".records[$i].data.value" | base64 -d 2>/dev/null | jq -r)
 
@@ -691,7 +692,7 @@ done
 rm -rf "$tmp_dir"
 
 end_time=$(date '+%s')
-duration=$(($end_time - $start_time))
+duration=$((end_time - start_time))
 matched_count=$(echo "$components_json" | jq 'length')
 log "$RESULTS_BACKEND query complete: $matched_count/$num_components components in ${duration}s"
 
@@ -701,6 +702,7 @@ step_start=$(date '+%s')
 cluster_labels="appstudio.openshift.io/application=${APP},pipelinesascode.tekton.dev/event-type!=pull_request,pipelines.appstudio.openshift.io/type=build"
 all_cluster_prs=$($KUBECTL_CMD get pipelinerun -l "$cluster_labels" -o json --ignore-not-found)
 log "fetched on-cluster pipelineruns ($(( $(date '+%s') - step_start ))s)"
+# shellcheck disable=SC2016
 merge_jq='
   ($cluster[0].items // [] | group_by(.metadata.labels["appstudio.openshift.io/component"])
     | map({key: .[0].metadata.labels["appstudio.openshift.io/component"], value: (sort_by(.metadata.creationTimestamp) | last)})
@@ -729,7 +731,7 @@ log "on-cluster comparison complete: $cluster_newer_count/$num_components had ne
 #
 # processing output for rerun subcommand, all-failed option
 #
-if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "true" ]; then
+if [ "$OPERATION" = "rerun" ] && [ "$RERUN_ALL_FAILED" = "true" ]; then
   if [ "$RERUN_FORCE" = "true" ]; then
     log "force retriggering all components..."
     rerun_components=$(echo "$components_json" | jq -r '.[] | .metadata.labels["appstudio.openshift.io/component"]')
@@ -745,7 +747,7 @@ if [ "$OPERATION" = "rerun" -a "$RERUN_ALL_FAILED" = "true" ]; then
   fi
   log "triggering reruns..."
   for component in $rerun_components; do
-    rerun_component $component
+    rerun_component "$component"
   done
 fi
 
@@ -754,7 +756,7 @@ fi
 #
 if [ "$OPERATION" = "app-status" ]; then
   log "app-status complete: $num_components components in $(( $(date '+%s') - SCRIPT_START ))s"
-  if [ $OUTPUT_TYPE = "json" ]; then
+  if [ "$OUTPUT_TYPE" = "json" ]; then
     echo "$components_json" | jq -r -M
     exit 0
   fi
@@ -783,7 +785,7 @@ if [ "$OPERATION" = "app-status" ]; then
     | sed -E 's/(PipelineRunTimeout|Failed)$/\x1B[91m\1\x1B[0m/' \
     | sed -E 's/(Running|ResolvingTaskRef)$/\x1B[94m\1\x1B[0m/' 
 
-  if [ "$WATCH" = true ]; then exec "$0" $ORIGINAL_ARGS; fi
+  if [ "$WATCH" = true ]; then exec "$0" "$ORIGINAL_ARGS"; fi
 
 fi
 

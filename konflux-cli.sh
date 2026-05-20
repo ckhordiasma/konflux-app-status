@@ -11,10 +11,11 @@ cat << EOF
 usage: ./konflux-cli.sh [-v] SUBCOMMAND
 SUBCOMMANDS
   app-status [-h] [-o json|table] APP
-    APP - the name of the application in konflux 
+    APP - the name of the application in konflux
     -H, --no-hyperlinks - remove terminal hyperlinks from table display output
     -o, --output - set output to either json or table
     -w, --watch - watch output
+    --all - show all components (default: only failing and running)
   logs COMPONENT | PIPELINERUN
     COMPONENT - name of the component to get logs for (uses latest pipelinerun)
     PIPELINERUN - name of a specific pipelinerun to get logs for
@@ -63,7 +64,7 @@ RERUN_ALL_FAILED=false
 RERUN_FORCE=false
 RERUN_ARG=
 LOGS_URL=false
-LOGS_ALL=false
+SHOW_ALL=false
 LOGS_ARG=
 APP=
 NAMESPACE=
@@ -146,7 +147,7 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --all)
-      LOGS_ALL=true
+      SHOW_ALL=true
       shift
       ;;
     -*)
@@ -444,7 +445,7 @@ if [ "$OPERATION" = "logs" ]; then
       taskrun_json=$($KUBECTL_CMD get taskrun "$taskrun_name" -o json --ignore-not-found 2>/dev/null)
 
       # Filter to failed tasks unless --all is set
-      if [ "$LOGS_ALL" = "false" ]; then
+      if [ "$SHOW_ALL" = "false" ]; then
         is_failed=$(echo "$taskrun_json" | jq -r '(.status.conditions[0].status == "False") // false')
         if [ "$is_failed" != "true" ]; then
           continue
@@ -465,7 +466,7 @@ if [ "$OPERATION" = "logs" ]; then
           echo "$task_params"
         fi
 
-        if [ "$LOGS_ALL" = "true" ]; then
+        if [ "$SHOW_ALL" = "true" ]; then
           # Show all containers
           echo ""
           $KUBECTL_CMD logs "$pod_name" --all-containers --ignore-errors 2>/dev/null || log "warning: could not get logs for pod $pod_name"
@@ -488,7 +489,7 @@ if [ "$OPERATION" = "logs" ]; then
       fi
     done
 
-    if [ "$printed_logs" = "false" ] && [ "$LOGS_ALL" = "false" ]; then
+    if [ "$printed_logs" = "false" ] && [ "$SHOW_ALL" = "false" ]; then
       echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
     fi
     exit 0
@@ -511,7 +512,7 @@ if [ "$OPERATION" = "logs" ]; then
     for taskrun in $(echo "$taskruns_json" | jq -r '.items[].metadata.name'); do
       taskrun_item=$(echo "$taskruns_json" | jq --arg T "$taskrun" '.items[] | select(.metadata.name==$T)')
 
-      if [ "$LOGS_ALL" = "false" ]; then
+      if [ "$SHOW_ALL" = "false" ]; then
         is_failed=$(echo "$taskrun_item" | jq -r '(.status.conditions[0].status == "False") // false')
         if [ "$is_failed" != "true" ]; then
           continue
@@ -527,7 +528,7 @@ if [ "$OPERATION" = "logs" ]; then
       fi
 
       # Determine which steps to show logs for
-      if [ "$LOGS_ALL" = "true" ]; then
+      if [ "$SHOW_ALL" = "true" ]; then
         step_names=$(echo "$taskrun_item" | jq -r '.status.steps[]?.name')
       else
         # Find only the first failed step (cascading failures are noise)
@@ -556,7 +557,7 @@ if [ "$OPERATION" = "logs" ]; then
       printed_logs=true
     done
 
-    if [ "$printed_logs" = "false" ] && [ "$LOGS_ALL" = "false" ]; then
+    if [ "$printed_logs" = "false" ] && [ "$SHOW_ALL" = "false" ]; then
       echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
     fi
 
@@ -585,7 +586,7 @@ if [ "$OPERATION" = "logs" ]; then
       record_name=$(echo "$raw_records" | jq -r ".records[$i].name")
       taskrun_item=$(echo "$raw_records" | jq -r ".records[$i].data.value" | base64 -d 2>/dev/null | jq -r)
 
-      if [ "$LOGS_ALL" = "false" ]; then
+      if [ "$SHOW_ALL" = "false" ]; then
         is_failed=$(echo "$taskrun_item" | jq -r '(.status.conditions[0].status == "False") // false')
         if [ "$is_failed" != "true" ]; then
           continue
@@ -625,7 +626,7 @@ if [ "$OPERATION" = "logs" ]; then
       printed_logs=true
     done
 
-    if [ "$printed_logs" = "false" ] && [ "$LOGS_ALL" = "false" ]; then
+    if [ "$printed_logs" = "false" ] && [ "$SHOW_ALL" = "false" ]; then
       echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
     fi
   fi
@@ -760,22 +761,62 @@ if [ "$OPERATION" = "app-status" ]; then
     echo "$components_json" | jq -r -M
     exit 0
   fi
+  if [ "$SHOW_ALL" = "false" ]; then
+    components_json=$(echo "$components_json" | jq '[.[] | select(.status.conditions[0].reason | test("^(Completed|Succeeded)$") | not)]')
+  fi
   # using semicolon as the delimiter for column command, and comma as delimiter for awk (for adding terminal hyperlinks)
-  FINAL_OUTPUT=$(echo "$components_json" | jq -r '.[]| .metadata.annotations["pipelinesascode.tekton.dev/log-url"] + ";," + .metadata.name + ";," + .status.conditions[0].reason' | sed '1s/^/PIPELINE RUN URL;,PIPELINE RUN;,STATUS\n/' |column -t -s ";")
+  # pipe-delimited component name is appended to status for awk to extract
+  FINAL_OUTPUT=$(echo "$components_json" | jq -r '.[]| .metadata.annotations["pipelinesascode.tekton.dev/log-url"] + ";," + .metadata.name + ";," + .status.conditions[0].reason + "|" + .metadata.labels["appstudio.openshift.io/component"]' | sed '1s/^/PIPELINE RUN URL;,PIPELINE RUN;,STATUS\n/' |column -t -s ";")
 
 
   if [ "$WATCH" = true ]; then clear; fi
   # adding terminal hyperlinks with awk and colors with sed
   echo "$FINAL_OUTPUT" \
-    | awk -F "," -v hyperlinks="$HYPERLINKS" '{
+    | awk -F "," -v hyperlinks="$HYPERLINKS" -v cluster_suffix="$CLUSTER_SUFFIX" -v ns="$NAMESPACE" -v app="$APP" '{
       url=$1
       pipeline=$2
       pipeline_pad=$2
-      status=$3
+      status_comp=$3
       gsub(/ +/,"",pipeline)
       gsub(/ +/,"",url)
       gsub(/[^ ]/,"",pipeline_pad)
-      if (hyperlinks == "true") {
+
+      n = split(status_comp, sc, "|")
+      status = sc[1]
+      component = (n >= 2) ? sc[2] : ""
+      gsub(/ +/,"",status)
+      gsub(/ +/,"",component)
+
+      if (hyperlinks == "true" && component != "") {
+        if (match(pipeline, /-on-(push|pull-request)-[a-z0-9]+$/)) {
+          component_part = substr(pipeline, 1, RSTART - 1)
+          suffix = substr(pipeline, RSTART)
+        } else {
+          # Truncated pipelinerun name: find longest common prefix with component
+          max = length(pipeline)
+          if (length(component) < max) max = length(component)
+          split_at = 0
+          for (i = 1; i <= max; i++) {
+            if (substr(pipeline, i, 1) != substr(component, i, 1)) break
+            split_at = i
+          }
+          if (split_at > 0) {
+            component_part = substr(pipeline, 1, split_at)
+            suffix = substr(pipeline, split_at + 1)
+          } else {
+            component_part = ""
+            suffix = pipeline
+          }
+        }
+        comp_url = "https://konflux-ui.apps" cluster_suffix "/ns/" ns "/applications/" app "/components/" component "/activity/pipelineruns"
+
+        sc_color = ""
+        if (status ~ /^(Completed|Succeeded)$/) sc_color = "\033[92m"
+        else if (status ~ /^(PipelineRunTimeout|Failed)$/) sc_color = "\033[91m"
+        else if (status ~ /^(Running|ResolvingTaskRef)$/) sc_color = "\033[94m"
+
+        printf "\033[38;5;75m\033]8;;%s\033\\%s\033]8;;\033\\\033[38;5;110m\033]8;;%s\033\\%s\033]8;;\033\\\033[0m%s%s\033]8;;%s\033\\%s\033]8;;\033\\\033[0m\n", comp_url, component_part, url, suffix, pipeline_pad, sc_color, url, status
+      } else if (hyperlinks == "true") {
         printf "\033]8;;%s\033\\%s\033]8;;\033\\%s%s\n", url, pipeline, pipeline_pad, status
       } else {
         printf "%s%s%s\n", pipeline, pipeline_pad, status
@@ -783,7 +824,7 @@ if [ "$OPERATION" = "app-status" ]; then
     }' \
     | sed -E 's/(Completed|Succeeded)$/\x1B[92m\1\x1B[0m/' \
     | sed -E 's/(PipelineRunTimeout|Failed)$/\x1B[91m\1\x1B[0m/' \
-    | sed -E 's/(Running|ResolvingTaskRef)$/\x1B[94m\1\x1B[0m/' 
+    | sed -E 's/(Running|ResolvingTaskRef)$/\x1B[94m\1\x1B[0m/'
 
   if [ "$WATCH" = true ]; then exec "$0" "$ORIGINAL_ARGS"; fi
 

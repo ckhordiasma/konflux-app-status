@@ -646,85 +646,54 @@ log "found $num_components components ($(( $(date '+%s') - step_start ))s)"
 
 components_json='[]'
 
-# There is sometimes a discrepancy between kubearchive and tekton-results;
-# tekton-results is preferred as the potentially more stable backend.
 if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
-  ka_batch_size="${KUBEARCHIVE_BATCH_SIZE:-0}"
-  if [ "$ka_batch_size" -gt 0 ] 2>/dev/null; then
-    log "querying kubearchive for $num_components components (parallel, batch size $ka_batch_size)..."
-  else
-    log "querying kubearchive for $num_components components (parallel)..."
-  fi
-  start_time=$(date '+%s')
-  ka_tmp_dir=$(mktemp -d)
+  batch_size="${KUBEARCHIVE_BATCH_SIZE:-0}"
   ka_since=$(date -u -d '90 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-90d '+%Y-%m-%dT%H:%M:%SZ')
-
-  batch_count=0
-  for component in $components; do
-    (
-      label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request),appstudio.openshift.io/component=${component}"
-      get_kubearchive_results "$label_selector" 1 "" "$ka_since" | jq '.items[0] // empty' > "${ka_tmp_dir}/${component}.json"
-    ) &
-    batch_count=$((batch_count + 1))
-    if [ "$ka_batch_size" -gt 0 ] && [ $((batch_count % ka_batch_size)) -eq 0 ]; then
-      wait
-    fi
-  done
-  wait
-
-  components_json=$(find "$ka_tmp_dir" -name '*.json' -not -empty -exec cat {} + | jq -s '[.[] | select(. != null)]')
-  for component in $components; do
-    result_file="${ka_tmp_dir}/${component}.json"
-    if [ ! -s "$result_file" ] || [ "$(cat "$result_file")" = "null" ]; then
-      log "warning: no pipeline found for component $component"
-    fi
-  done
-  rm -rf "$ka_tmp_dir"
-
-  end_time=$(date '+%s')
-  duration=$(($end_time - $start_time))
-  matched_count=$(echo "$components_json" | jq 'length')
-  log "kubearchive query complete: $matched_count/$num_components components in ${duration}s"
-
+  function get_latest_for_component {
+    local component="$1"
+    local label_selector="appstudio.openshift.io/application=${APP},pipelines.appstudio.openshift.io/type=build,pipelinesascode.tekton.dev/event-type notin (pull_request),appstudio.openshift.io/component=${component}"
+    get_kubearchive_results "$label_selector" 1 "" "$ka_since" | jq '.items[0] // empty'
+  }
 else
   app_params="$is_pipeline && $not_pull && $is_app && $is_build"
-
-  tr_batch_size="${TEKTON_RESULTS_BATCH_SIZE:-20}"
-  if [ "$tr_batch_size" -gt 0 ] 2>/dev/null; then
-    log "querying tekton-results for $num_components components (parallel, batch size $tr_batch_size)..."
-  else
-    log "querying tekton-results for $num_components components (parallel)..."
-  fi
-  start_time=$(date '+%s')
-  tr_tmp_dir=$(mktemp -d)
-
-  batch_count=0
-  for component in $components; do
-    (
-      is_component="data.metadata.labels['appstudio.openshift.io/component']=='$component'"
-      get_results 5 "$app_params && $is_component" | jq 'first // empty' > "${tr_tmp_dir}/${component}.json"
-    ) &
-    batch_count=$((batch_count + 1))
-    if [ "$tr_batch_size" -gt 0 ] && [ $((batch_count % tr_batch_size)) -eq 0 ]; then
-      wait
-    fi
-  done
-  wait
-
-  components_json=$(find "$tr_tmp_dir" -name '*.json' -not -empty -exec cat {} + | jq -s '[.[] | select(. != null)]')
-  for component in $components; do
-    result_file="${tr_tmp_dir}/${component}.json"
-    if [ ! -s "$result_file" ] || [ "$(cat "$result_file")" = "null" ]; then
-      log "warning: no pipeline found for component $component"
-    fi
-  done
-  rm -rf "$tr_tmp_dir"
-
-  end_time=$(date '+%s')
-  duration=$(($end_time - $start_time))
-  matched_count=$(echo "$components_json" | jq 'length')
-  log "tekton-results query complete: $matched_count/$num_components components in ${duration}s"
+  batch_size="${TEKTON_RESULTS_BATCH_SIZE:-20}"
+  function get_latest_for_component {
+    local component="$1"
+    local is_component="data.metadata.labels['appstudio.openshift.io/component']=='$component'"
+    get_results 5 "$app_params && $is_component" | jq 'first // empty'
+  }
 fi
+
+if [ "$batch_size" -gt 0 ] 2>/dev/null; then
+  log "querying $RESULTS_BACKEND for $num_components components (parallel, batch size $batch_size)..."
+else
+  log "querying $RESULTS_BACKEND for $num_components components (parallel)..."
+fi
+start_time=$(date '+%s')
+tmp_dir=$(mktemp -d)
+
+batch_count=0
+for component in $components; do
+  ( get_latest_for_component "$component" > "${tmp_dir}/${component}.json" ) &
+  batch_count=$((batch_count + 1))
+  if [ "$batch_size" -gt 0 ] && [ $((batch_count % batch_size)) -eq 0 ]; then
+    wait
+  fi
+done
+wait
+
+components_json=$(find "$tmp_dir" -name '*.json' -not -empty -exec cat {} + | jq -s '[.[] | select(. != null)]')
+for component in $components; do
+  if [ ! -s "${tmp_dir}/${component}.json" ] || [ "$(cat "${tmp_dir}/${component}.json")" = "null" ]; then
+    log "warning: no pipeline found for component $component"
+  fi
+done
+rm -rf "$tmp_dir"
+
+end_time=$(date '+%s')
+duration=$(($end_time - $start_time))
+matched_count=$(echo "$components_json" | jq 'length')
+log "$RESULTS_BACKEND query complete: $matched_count/$num_components components in ${duration}s"
 
 # Compare each component's backend result with on-cluster pipelineruns and use the newer one
 log "comparing with on-cluster pipelineruns..."

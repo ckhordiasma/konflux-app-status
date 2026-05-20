@@ -21,7 +21,7 @@ Clone this repo and run `./konflux-cli.sh` directly, or copy `kubectl-konflux` t
 
 - kubectl
 - [jq](https://jqlang.github.io/jq/)
-- [kubelogin](https://github.com/int128/kubelogin) (for OIDC authentication)
+- curl
 
 kubectl needs to be configured with access to a cluster using `oc login`.
 

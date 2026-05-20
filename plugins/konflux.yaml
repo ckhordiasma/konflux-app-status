@@ -16,9 +16,7 @@ spec:
       logs        Stream or fetch build logs for a component or pipelinerun
       rerun       Retrigger a component build or all failed components
   caveats: |
-    This plugin requires the following tools to be installed:
-      - jq (https://jqlang.github.io/jq/)
-      - kubelogin (for OIDC authentication)
+    This plugin requires jq (https://jqlang.github.io/jq/) and curl to be installed.
 
     Your kubectl context must be configured for a Konflux cluster.
   platforms:

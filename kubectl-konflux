@@ -21,6 +21,9 @@ SUBCOMMANDS
     PIPELINERUN - name of a specific pipelinerun to get logs for
     --url - print the log URL instead of streaming log text
     --all - show logs for all tasks (default: only failed tasks)
+    --tasks task1,task2 - show logs only for the specified tasks (comma-separated)
+  logs tasks COMPONENT | PIPELINERUN
+    List the task names in a pipelinerun (one per line)
   rerun COMPONENT | PIPELINERUN | -a APP
     COMPONENT - name of the component that needs to be rerun
     PIPELINERUN - name of a specific pipelinerun to rerun
@@ -42,6 +45,8 @@ EXAMPLES
   kubectl konflux logs odh-dashboard-v2-17-on-push-ndnj9
   kubectl konflux logs --url odh-dashboard-v2-17
   kubectl konflux logs --all odh-dashboard-v2-17
+  kubectl konflux logs tasks odh-dashboard-v2-17
+  kubectl konflux logs --tasks buildah,clair-scan odh-dashboard-v2-17
 DEPENDENCIES
   kubectl, jq, curl
   kubectl context must be configured with access to a Konflux cluster
@@ -66,6 +71,8 @@ RERUN_ARG=
 LOGS_URL=false
 SHOW_ALL=false
 LOGS_ARG=
+LOGS_SUBCOMMAND=
+LOGS_TASKS_FILTER=
 APP=
 NAMESPACE=
 CONTEXT=
@@ -150,13 +157,24 @@ while [ "$#" -gt 0 ]; do
       SHOW_ALL=true
       shift
       ;;
+    --tasks)
+      LOGS_TASKS_FILTER="$2"
+      if [ -z "$LOGS_TASKS_FILTER" ]; then
+        echo "please specify a comma-separated list of task names for --tasks"
+        help
+        exit 1
+      fi
+      shift 2
+      ;;
     -*)
       echo "unrecognized argument $1"
       help
       exit 1
       ;;
     *)
-      if [ -z "$CLI_ARG" ]; then
+      if [ "$1" = "tasks" ] && [ "$OPERATION" = "logs" ]; then
+        LOGS_SUBCOMMAND="tasks"
+      elif [ -z "$CLI_ARG" ]; then
         CLI_ARG="$1"
       else
         echo "parameter not recognized: $1"
@@ -187,6 +205,9 @@ elif [ "$OPERATION" = "rerun" ]; then
   fi
 elif [ "$OPERATION" = "logs" ]; then
   LOGS_ARG="$CLI_ARG"
+  if [ -n "$LOGS_TASKS_FILTER" ]; then
+    SHOW_ALL=true
+  fi
 fi
 
 SCRIPT_START=$(date '+%s')
@@ -245,6 +266,21 @@ KUBECTL_CMD="kubectl -n $NAMESPACE --context $CONTEXT"
 function get_token() {
   # echo $OIDC_CMD | xargs -r kubectl | jq -r '.status.token'
   kubectl config view -o json --raw | jq -r --arg X "$USER_NAME" '.users[] | select(.name==$X) | .user.token'
+}
+
+function task_matches_filter {
+  local task_name="$1"
+  local filter="$2"
+  if [ -z "$filter" ]; then
+    return 0
+  fi
+  local IFS=','
+  for f in $filter; do
+    if [ "$f" = "$task_name" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 #
@@ -409,7 +445,46 @@ if [ "$OPERATION" = "logs" ]; then
 
   log "resolved pipelinerun: $LOGS_PR_NAME"
 
-  # Step 2: Handle --url flag (early exit)
+  # Step 2: Handle "logs tasks" sub-subcommand (early exit — list task names only)
+  if [ "$LOGS_SUBCOMMAND" = "tasks" ]; then
+    log "listing tasks for pipelinerun $LOGS_PR_NAME..."
+
+    task_names=""
+
+    # Try on-cluster first
+    pr_on_cluster=$($KUBECTL_CMD get pipelinerun "$LOGS_PR_NAME" -o json --ignore-not-found 2>/dev/null)
+    if [ -n "$pr_on_cluster" ] && echo "$pr_on_cluster" | jq -e '.metadata.name' > /dev/null 2>&1; then
+      task_names=$(echo "$pr_on_cluster" | jq -r '.status.childReferences[]? | select(.kind=="TaskRun") | .pipelineTaskName // .name')
+    fi
+
+    # Fall back to backend
+    if [ -z "$task_names" ]; then
+      if [ "$RESULTS_BACKEND" = "kubearchive" ]; then
+        taskruns_json=$(get_kubearchive_taskruns "tekton.dev/pipelineRun=$LOGS_PR_NAME")
+        task_names=$(echo "$taskruns_json" | jq -r '.items[]? | .metadata.labels["tekton.dev/pipelineTask"] // .metadata.name')
+      elif [ "$RESULTS_BACKEND" = "tekton-results" ]; then
+        is_taskrun="(data_type == 'tekton.dev/v1beta1.TaskRun' || data_type == 'tekton.dev/v1.TaskRun')"
+        is_for_pr="data.metadata.labels['tekton.dev/pipelineRun']=='$LOGS_PR_NAME'"
+        raw_records=$(curl -s -k --get \
+          -H "Authorization: Bearer $(get_token)" \
+          -H "Accept: application/json" \
+          --data-urlencode "filter=$is_taskrun && $is_for_pr" \
+          --data-urlencode "page_size=50" \
+          --data-urlencode "order_by=create_time desc" \
+          "$API/parents/$NAMESPACE/results/-/records" 2>/dev/null)
+        task_names=$(echo "$raw_records" | jq -r '.records[]? | .data.value' | base64 -d 2>/dev/null | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // .metadata.name')
+      fi
+    fi
+
+    if [ -z "$task_names" ]; then
+      echo "Error: no tasks found for pipelinerun $LOGS_PR_NAME"
+      exit 1
+    fi
+    echo "$task_names"
+    exit 0
+  fi
+
+  # Step 3: Handle --url flag (early exit)
   if [ "$LOGS_URL" = "true" ]; then
     log_url=$($KUBECTL_CMD get pipelinerun "$LOGS_PR_NAME" -o jsonpath='{.metadata.annotations.pipelinesascode\.tekton\.dev/log-url}' --ignore-not-found 2>/dev/null)
     if [ -z "$log_url" ] && [ -n "$LOGS_PR_JSON" ]; then
@@ -467,6 +542,10 @@ if [ "$OPERATION" = "logs" ]; then
         task_display_name="$taskrun_name"
       fi
 
+      if ! task_matches_filter "$task_display_name" "$LOGS_TASKS_FILTER"; then
+        continue
+      fi
+
       pod_name=$(echo "$taskrun_json" | jq -r '.status.podName // empty')
       if [ -n "$pod_name" ]; then
         echo ""
@@ -499,8 +578,13 @@ if [ "$OPERATION" = "logs" ]; then
       fi
     done
 
-    if [ "$printed_logs" = "false" ] && [ "$SHOW_ALL" = "false" ]; then
-      echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+    if [ "$printed_logs" = "false" ]; then
+      if [ -n "$LOGS_TASKS_FILTER" ]; then
+        echo "No tasks matching '$LOGS_TASKS_FILTER' found in pipelinerun $LOGS_PR_NAME."
+        echo "Hint: use 'kubectl konflux logs tasks $LOGS_ARG' to list available task names."
+      elif [ "$SHOW_ALL" = "false" ]; then
+        echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+      fi
     fi
     exit 0
   fi
@@ -530,6 +614,11 @@ if [ "$OPERATION" = "logs" ]; then
       fi
 
       task_display_name=$(echo "$taskrun_item" | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // .metadata.name')
+
+      if ! task_matches_filter "$task_display_name" "$LOGS_TASKS_FILTER"; then
+        continue
+      fi
+
       echo ""
       echo "=== Task: $task_display_name ($taskrun) ==="
       task_params=$(echo "$taskrun_item" | jq -r '.spec.params[]? | "  \(.name) = \(.value)"')
@@ -567,8 +656,13 @@ if [ "$OPERATION" = "logs" ]; then
       printed_logs=true
     done
 
-    if [ "$printed_logs" = "false" ] && [ "$SHOW_ALL" = "false" ]; then
-      echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+    if [ "$printed_logs" = "false" ]; then
+      if [ -n "$LOGS_TASKS_FILTER" ]; then
+        echo "No tasks matching '$LOGS_TASKS_FILTER' found in pipelinerun $LOGS_PR_NAME."
+        echo "Hint: use 'kubectl konflux logs tasks $LOGS_ARG' to list available task names."
+      elif [ "$SHOW_ALL" = "false" ]; then
+        echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+      fi
     fi
 
   elif [ "$RESULTS_BACKEND" = "tekton-results" ]; then
@@ -605,6 +699,11 @@ if [ "$OPERATION" = "logs" ]; then
 
       taskrun_name=$(echo "$taskrun_item" | jq -r '.metadata.name')
       task_display_name=$(echo "$taskrun_item" | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // .metadata.name')
+
+      if ! task_matches_filter "$task_display_name" "$LOGS_TASKS_FILTER"; then
+        continue
+      fi
+
       echo ""
       echo "=== Task: $task_display_name ($taskrun_name) ==="
       task_params=$(echo "$taskrun_item" | jq -r '.spec.params[]? | "  \(.name) = \(.value)"')
@@ -636,8 +735,13 @@ if [ "$OPERATION" = "logs" ]; then
       printed_logs=true
     done
 
-    if [ "$printed_logs" = "false" ] && [ "$SHOW_ALL" = "false" ]; then
-      echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+    if [ "$printed_logs" = "false" ]; then
+      if [ -n "$LOGS_TASKS_FILTER" ]; then
+        echo "No tasks matching '$LOGS_TASKS_FILTER' found in pipelinerun $LOGS_PR_NAME."
+        echo "Hint: use 'kubectl konflux logs tasks $LOGS_ARG' to list available task names."
+      elif [ "$SHOW_ALL" = "false" ]; then
+        echo "All tasks succeeded for pipelinerun $LOGS_PR_NAME. Use --all to see all task logs."
+      fi
     fi
   fi
 
